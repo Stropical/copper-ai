@@ -38,10 +38,17 @@ JSON_SCHEMA_VALIDATOR::JSON_SCHEMA_VALIDATOR( const wxFileName& aSchemaFile )
         LOCALE_IO dummy;
 #endif
 
+        if( !schema_stream.is_open() || !schema_stream.good() )
+        {
+            wxLogError( wxString::Format( _( "Cannot open schema file '%s'" ),
+                                          aSchemaFile.GetFullPath() ) );
+            return;
+        }
+
         schema_stream >> schema;
         m_validator.set_root_schema( schema );
     }
-    catch( std::exception& e )
+    catch( const std::exception& e )
     {
         if( !aSchemaFile.FileExists() )
         {
@@ -52,6 +59,14 @@ JSON_SCHEMA_VALIDATOR::JSON_SCHEMA_VALIDATOR( const wxFileName& aSchemaFile )
         {
             wxLogError( wxString::Format( _( "Error loading schema: %s" ), e.what() ) );
         }
+        // Don't re-throw - allow construction to complete with invalid validator
+        // The validator will fail validation checks later, which is safer than crashing
+    }
+    catch( ... )
+    {
+        wxLogError( wxString::Format( _( "Unknown error loading schema file '%s'" ),
+                                      aSchemaFile.GetFullPath() ) );
+        // Don't re-throw - allow construction to complete with invalid validator
     }
 }
 

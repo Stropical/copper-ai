@@ -240,6 +240,7 @@ public:
     static TOOL_ACTION navigatePrevious;
     static TOOL_ACTION navigateNext;
     static TOOL_ACTION showHierarchy;
+    static TOOL_ACTION showOllamaAgent;
     static TOOL_ACTION hypertextCommand;
 
     // Global edit tools
@@ -276,6 +277,10 @@ public:
     static TOOL_ACTION repairSchematic;
     static TOOL_ACTION previousUnit;
     static TOOL_ACTION nextUnit;
+
+    // Ollama Agent
+    static TOOL_ACTION ollamaAgentRequest;
+    static TOOL_ACTION ollamaAgentDialog;
 
     // Line modes
     static TOOL_ACTION lineModeFree;

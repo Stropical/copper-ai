@@ -1455,6 +1455,14 @@ TOOL_ACTION SCH_ACTIONS::showHierarchy( TOOL_ACTION_ARGS()
         .ToolbarState( TOOLBAR_STATE::TOGGLE )
         .Icon( BITMAPS::hierarchy_nav ) );
 
+TOOL_ACTION SCH_ACTIONS::showOllamaAgent( TOOL_ACTION_ARGS()
+        .Name( "eeschema.EditorTool.showOllamaAgent" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "AI Agent" ) )
+        .Tooltip( _( "Show/hide the Ollama AI agent chat panel" ) )
+        .ToolbarState( TOOLBAR_STATE::TOGGLE )
+        .Icon( BITMAPS::tools ) );
+
 
 // SCH_LINE_WIRE_BUS_TOOL
 //
@@ -1768,5 +1776,20 @@ TOOL_ACTION SCH_ACTIONS::removeVariant( TOOL_ACTION_ARGS()
         .Scope( AS_GLOBAL )
         .FriendlyName( _( "Remove Variant..." ) )
         .Tooltip( _( "Remove an existing variant from the schematic." ) ) );
+
+// Ollama Agent
+TOOL_ACTION SCH_ACTIONS::ollamaAgentRequest( TOOL_ACTION_ARGS()
+        .Name( "eeschema.OllamaAgentTool.request" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Ollama Agent Request" ) )
+        .Tooltip( _( "Send a request to the Ollama AI agent" ) )
+        .Icon( BITMAPS::tools ) );
+
+TOOL_ACTION SCH_ACTIONS::ollamaAgentDialog( TOOL_ACTION_ARGS()
+        .Name( "eeschema.OllamaAgentTool.dialog" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Ollama Agent Dialog" ) )
+        .Tooltip( _( "Open dialog to interact with Ollama AI agent" ) )
+        .Icon( BITMAPS::tools ) );
 
 // clang-format on

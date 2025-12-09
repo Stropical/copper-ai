@@ -280,6 +280,7 @@ set( EESCHEMA_SIM_SRCS
 
 set( EESCHEMA_WIDGETS
     widgets/hierarchy_pane.cpp
+    widgets/sch_ollama_agent_pane.cpp
     widgets/panel_sch_selection_filter_base.cpp
     widgets/panel_sch_selection_filter.cpp
     widgets/panel_symbol_chooser.cpp
@@ -452,6 +453,7 @@ set( EESCHEMA_SRCS
     tools/ee_grid_helper.cpp
     tools/rule_area_create_helper.cpp
     tools/sch_actions.cpp
+    tools/sch_agent.cpp
     tools/sch_drawing_tools.cpp
     tools/sch_design_block_control.cpp
     tools/sch_edit_table_tool.cpp
@@ -465,6 +467,9 @@ set( EESCHEMA_SRCS
     tools/sch_drag_net_collision.cpp
     tools/sch_move_tool.cpp
     tools/sch_navigate_tool.cpp
+    tools/ollama_client.cpp
+    tools/sch_ollama_agent_dialog.cpp
+    tools/sch_ollama_agent_tool.cpp
     tools/sch_point_editor.cpp
     tools/sch_selection.cpp
     tools/sch_selection_tool.cpp

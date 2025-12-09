@@ -63,6 +63,22 @@ SCRIPTING::SCRIPTING()
 
     pybind11::initialize_interpreter();
 
+    // Ensure __main__ module exists (required by pybind11::globals())
+    // This is needed because embedded Python may not have __main__ initialized
+    try
+    {
+        pybind11::module_::import("__main__");
+    }
+    catch( const pybind11::error_already_set& e )
+    {
+        // If __main__ doesn't exist, create it
+        PyObject* main_module = PyImport_AddModule("__main__");
+        if( !main_module )
+        {
+            wxLogError( wxT( "Failed to create __main__ module: %s" ), e.what() );
+        }
+    }
+
     // Save the current Python thread state and release the Global Interpreter Lock.
     m_python_thread_state = PyEval_SaveThread();
 }

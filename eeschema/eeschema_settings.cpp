@@ -127,6 +127,28 @@ const wxAuiPaneInfo& defaultSchSelectionFilterPaneInfo( wxWindow* aWindow )
 }
 
 
+const wxAuiPaneInfo& defaultOllamaAgentPaneInfo( wxWindow* aWindow )
+{
+    static wxAuiPaneInfo paneInfo;
+
+    paneInfo.Name( wxS( "OllamaAgent" ) )
+            .Caption( _( "AI Agent" ) )
+            .CaptionVisible( true )
+            .PaneBorder( true )
+            .Left().Layer( 3 ).Position( 3 )
+            .TopDockable( false )
+            .BottomDockable( false )
+            .CloseButton( true )
+            .MinSize( aWindow->FromDIP( wxSize( 300, 200 ) ) )
+            .BestSize( aWindow->FromDIP( wxSize( 350, 400 ) ) )
+            .FloatingSize( aWindow->FromDIP( wxSize( 400, 500 ) ) )
+            .FloatingPosition( aWindow->FromDIP( wxPoint( 50, 50 ) ) )
+            .Show( false );
+
+    return paneInfo;
+}
+
+
 const wxAuiPaneInfo& defaultDesignBlocksPaneInfo( wxWindow* aWindow )
 {
     static wxAuiPaneInfo paneInfo;

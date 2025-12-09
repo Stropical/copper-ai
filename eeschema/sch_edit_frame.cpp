@@ -97,6 +97,7 @@
 #include <tools/sch_move_tool.h>
 #include <tools/sch_navigate_tool.h>
 #include <tools/sch_find_replace_tool.h>
+#include <tools/sch_ollama_agent_tool.h>
 #include <trace_helpers.h>
 #include <unordered_set>
 #include <view/view_controls.h>
@@ -105,6 +106,7 @@
 #include <widgets/bitmap_button.h>
 #include <widgets/sch_properties_panel.h>
 #include <widgets/sch_search_pane.h>
+#include <widgets/sch_ollama_agent_pane.h>
 #include <wildcards_and_files_ext.h>
 #include <wx/cmdline.h>
 #include <wx/app.h>
@@ -229,6 +231,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_searchPane = new SCH_SEARCH_PANE( this );
     m_propertiesPanel = new SCH_PROPERTIES_PANEL( this, this );
     m_remoteSymbolPane = new PANEL_REMOTE_SYMBOL( this );
+    m_ollamaAgentPane = new SCH_OLLAMA_AGENT_PANE( this );
 
     m_propertiesPanel->SetSplitterProportion( eeconfig()->m_AuiPanels.properties_splitter );
 
@@ -269,6 +272,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_auimgr.AddPane( m_designBlocksPane, defaultDesignBlocksPaneInfo( this ) );
     m_auimgr.AddPane( m_remoteSymbolPane, defaultRemoteSymbolPaneInfo( this ) );
+    m_auimgr.AddPane( m_ollamaAgentPane, defaultOllamaAgentPaneInfo( this ) );
 
     m_auimgr.AddPane( createHighlightedNetNavigator(), defaultNetNavigatorPaneInfo() );
 
@@ -297,12 +301,23 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     RestoreAuiLayout();
     FinishAUIInitialization();
 
+    // Connect the tool to the panel if available
+    if( GetToolManager() && m_ollamaAgentPane )
+    {
+        SCH_OLLAMA_AGENT_TOOL* tool = GetToolManager()->GetTool<SCH_OLLAMA_AGENT_TOOL>();
+        if( tool )
+        {
+            m_ollamaAgentPane->SetTool( tool );
+        }
+    }
+
     wxAuiPaneInfo& hierarchy_pane = m_auimgr.GetPane( SchematicHierarchyPaneName() );
     wxAuiPaneInfo& netNavigatorPane = m_auimgr.GetPane( NetNavigatorPaneName() );
     wxAuiPaneInfo& propertiesPane = m_auimgr.GetPane( PropertiesPaneName() );
     wxAuiPaneInfo& selectionFilterPane = m_auimgr.GetPane( wxS( "SelectionFilter" ) );
     wxAuiPaneInfo& designBlocksPane = m_auimgr.GetPane( DesignBlocksPaneName() );
     wxAuiPaneInfo& remoteSymbolPane = m_auimgr.GetPane( RemoteSymbolPaneName() );
+    wxAuiPaneInfo& ollamaAgentPane = m_auimgr.GetPane( OllamaAgentPaneName() );
 
     hierarchy_pane.Show( aui_cfg.show_schematic_hierarchy );
     netNavigatorPane.Show( aui_cfg.show_net_nav_panel );
@@ -313,6 +328,8 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         remoteSymbolPane.Show( false );
     else
         remoteSymbolPane.Show( aui_cfg.remote_symbol_show );
+
+    ollamaAgentPane.Show( false ); // Hidden by default
 
     updateSelectionFilterVisbility();
 
@@ -687,6 +704,7 @@ void SCH_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new SCH_NAVIGATE_TOOL );
     m_toolManager->RegisterTool( new PROPERTIES_TOOL );
     m_toolManager->RegisterTool( new EMBED_TOOL );
+    m_toolManager->RegisterTool( new SCH_OLLAMA_AGENT_TOOL );
     m_toolManager->InitTools();
 
     // Run the selection tool, it is supposed to be always active
@@ -2878,6 +2896,28 @@ void SCH_EDIT_FRAME::ToggleSchematicHierarchy()
 
         m_auimgr.Update();
     }
+}
+
+
+void SCH_EDIT_FRAME::ToggleOllamaAgent()
+{
+    if( !m_ollamaAgentPane )
+        return;
+
+    wxAuiPaneInfo& agentPane = m_auimgr.GetPane( OllamaAgentPaneName() );
+    agentPane.Show( !agentPane.IsShown() );
+
+    // Connect the tool to the panel if showing
+    if( agentPane.IsShown() && GetToolManager() )
+    {
+        SCH_OLLAMA_AGENT_TOOL* tool = GetToolManager()->GetTool<SCH_OLLAMA_AGENT_TOOL>();
+        if( tool )
+        {
+            m_ollamaAgentPane->SetTool( tool );
+        }
+    }
+
+    m_auimgr.Update();
 }
 
 

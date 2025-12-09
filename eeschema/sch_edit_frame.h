@@ -59,6 +59,7 @@ class SCHEMATIC;
 class SCH_COMMIT;
 class SCH_DESIGN_BLOCK_PANE;
 class PANEL_REMOTE_SYMBOL;
+class SCH_OLLAMA_AGENT_PANE;
 class DIALOG_BOOK_REPORTER;
 class DIALOG_ERC;
 class DIALOG_SYMBOL_FIELDS_TABLE;
@@ -820,6 +821,8 @@ public:
 
     void ToggleRemoteSymbolPanel();
 
+    void ToggleOllamaAgent();
+
 
     DIALOG_BOOK_REPORTER* GetSymbolDiffDialog();
 
@@ -867,6 +870,14 @@ public:
     static const wxString NetNavigatorPaneName()
     {
         return wxS( "NetNavigator" );
+    }
+
+    /**
+     * @return the name of the wxAuiPaneInfo managing the Ollama Agent panel.
+     */
+    static const wxString OllamaAgentPaneName()
+    {
+        return wxS( "OllamaAgent" );
     }
 
     void RefreshNetNavigator( const NET_NAVIGATOR_ITEM_DATA* aSelection = nullptr );
@@ -1067,6 +1078,7 @@ private:
     std::vector<LIB_ID>         m_designBlockHistoryList;
     SCH_DESIGN_BLOCK_PANE*      m_designBlocksPane;
     PANEL_REMOTE_SYMBOL*        m_remoteSymbolPane;
+    SCH_OLLAMA_AGENT_PANE*      m_ollamaAgentPane;
 
     wxChoice*                   m_currentVariantCtrl;
 
