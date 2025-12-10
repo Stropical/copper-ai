@@ -23,6 +23,7 @@
 #include <wx/menu.h>
 #include <wx/menuitem.h>
 #include <wx/listbox.h>
+#include <wx/listctrl.h>
 #include <wx/dataview.h>
 #include <wx/radiobut.h>
 #include <wx/slider.h>
@@ -31,6 +32,7 @@
 #include <wx/stc/stc.h>
 #include <wx/scrolbar.h>
 #include <wx/grid.h>
+#include <wx/window.h>
 #include <widgets/ui_common.h>
 
 #include <algorithm>
@@ -41,9 +43,40 @@
 #include <bitmaps/bitmap_types.h>
 #include <string_utils.h>
 #include <wx/hyperlink.h>
+#include <unordered_map>
 
 
 const wxString KIUI::s_FocusStealableInputName = wxS( "KI_NOFOCUS" );
+
+namespace
+{
+    std::unordered_map<wxWindow*, bool> s_hotkeySuppressors;
+
+    wxWindow* findHotkeySuppressor( wxWindow* aFocus, bool* aEditable = nullptr )
+    {
+        wxWindow* current = aFocus;
+
+        while( current )
+        {
+            auto entry = s_hotkeySuppressors.find( current );
+
+            if( entry != s_hotkeySuppressors.end() )
+            {
+                if( aEditable )
+                    *aEditable = entry->second;
+
+                return current;
+            }
+
+            current = current->GetParent();
+        }
+
+        if( aEditable )
+            *aEditable = false;
+
+        return nullptr;
+    }
+}
 
 
 int KIUI::GetStdMargin()
@@ -276,6 +309,9 @@ bool KIUI::IsInputControlFocused( wxWindow* aFocus )
     if( !aFocus )
         return false;
 
+    if( findHotkeySuppressor( aFocus ) )
+        return true;
+
     // These widgets are never considered focused
     if( aFocus->GetName() == s_FocusStealableInputName )
         return false;
@@ -283,6 +319,7 @@ bool KIUI::IsInputControlFocused( wxWindow* aFocus )
     wxTextEntry*      textEntry = dynamic_cast<wxTextEntry*>( aFocus );
     wxStyledTextCtrl* styledText = dynamic_cast<wxStyledTextCtrl*>( aFocus );
     wxListBox*        listBox = dynamic_cast<wxListBox*>( aFocus );
+    wxListCtrl*       listCtrl = dynamic_cast<wxListCtrl*>( aFocus );
     wxSearchCtrl*     searchCtrl = dynamic_cast<wxSearchCtrl*>( aFocus );
     wxCheckBox*       checkboxCtrl = dynamic_cast<wxCheckBox*>( aFocus );
     wxChoice*         choiceCtrl = dynamic_cast<wxChoice*>( aFocus );
@@ -290,6 +327,7 @@ bool KIUI::IsInputControlFocused( wxWindow* aFocus )
     wxSpinCtrl*       spinCtrl = dynamic_cast<wxSpinCtrl*>( aFocus );
     wxSpinCtrlDouble* spinDblCtrl = dynamic_cast<wxSpinCtrlDouble*>( aFocus );
     wxSlider*         sliderCtl = dynamic_cast<wxSlider*>( aFocus );
+    wxGrid*           gridCtrl = dynamic_cast<wxGrid*>( aFocus );
 
     // Data view control is annoying, the focus is on a "wxDataViewCtrlMainWindow" class that
     // is not formally exported via the header.
@@ -300,13 +338,19 @@ bool KIUI::IsInputControlFocused( wxWindow* aFocus )
     if( parent )
         dataViewCtrl = dynamic_cast<wxDataViewCtrl*>( parent );
 
-    return ( textEntry || styledText || listBox || searchCtrl || checkboxCtrl || choiceCtrl
-                || radioBtn || spinCtrl || spinDblCtrl || sliderCtl || dataViewCtrl );
+    return ( textEntry || styledText || listBox || listCtrl || searchCtrl || checkboxCtrl
+                || choiceCtrl || radioBtn || spinCtrl || spinDblCtrl || sliderCtl
+                || dataViewCtrl || gridCtrl );
 }
 
 
 bool KIUI::IsInputControlEditable( wxWindow* aFocus )
 {
+    bool editable = false;
+
+    if( findHotkeySuppressor( aFocus, &editable ) )
+        return editable;
+
     wxTextEntry*      textEntry = dynamic_cast<wxTextEntry*>( aFocus );
     wxStyledTextCtrl* styledText = dynamic_cast<wxStyledTextCtrl*>( aFocus );
     wxSearchCtrl*     searchCtrl = dynamic_cast<wxSearchCtrl*>( aFocus );
@@ -320,6 +364,24 @@ bool KIUI::IsInputControlEditable( wxWindow* aFocus )
 
     // Must return true if we can't determine the state, intentionally true for non inputs as well.
     return true;
+}
+
+
+void KIUI::RegisterHotkeySuppressor( wxWindow* aWindow, bool aEditable )
+{
+    if( !aWindow )
+        return;
+
+    s_hotkeySuppressors[aWindow] = aEditable;
+}
+
+
+void KIUI::UnregisterHotkeySuppressor( wxWindow* aWindow )
+{
+    if( !aWindow )
+        return;
+
+    s_hotkeySuppressors.erase( aWindow );
 }
 
 

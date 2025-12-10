@@ -61,21 +61,48 @@ SCRIPTING::SCRIPTING()
 {
     scriptingSetup();
 
-    pybind11::initialize_interpreter();
-
-    // Ensure __main__ module exists (required by pybind11::globals())
-    // This is needed because embedded Python may not have __main__ initialized
     try
     {
-        pybind11::module_::import("__main__");
+        pybind11::initialize_interpreter();
     }
     catch( const pybind11::error_already_set& e )
     {
-        // If __main__ doesn't exist, create it
-        PyObject* main_module = PyImport_AddModule("__main__");
-        if( !main_module )
+        // Python initialization failed - pybind11 exception
+        wxLogError( wxT( "Failed to initialize Python interpreter (pybind11 error): %s" ), e.what() );
+        m_python_thread_state = nullptr;
+        return;
+    }
+    catch( const std::exception& e )
+    {
+        // Python initialization failed - this can happen if Python framework is missing/corrupted
+        wxLogError( wxT( "Failed to initialize Python interpreter: %s" ), e.what() );
+        // Set thread state to nullptr to indicate failure
+        m_python_thread_state = nullptr;
+        return;
+    }
+    catch( ... )
+    {
+        // Catch any other exceptions during Python init
+        wxLogError( wxT( "Unknown error initializing Python interpreter" ) );
+        m_python_thread_state = nullptr;
+        return;
+    }
+
+    // Ensure __main__ module exists (required by pybind11::globals())
+    // Create it explicitly to avoid import errors
+    PyObject* main_module = PyImport_AddModule("__main__");
+    if( !main_module )
+    {
+        wxLogError( wxT( "Failed to create __main__ module" ) );
+        // Continue anyway - this might work for some operations
+    }
+    else
+    {
+        // Make sure it's in sys.modules
+        PyObject* sys_modules = PyImport_GetModuleDict();
+        if( sys_modules )
         {
-            wxLogError( wxT( "Failed to create __main__ module: %s" ), e.what() );
+            PyDict_SetItemString( sys_modules, "__main__", main_module );
         }
     }
 
@@ -86,15 +113,19 @@ SCRIPTING::SCRIPTING()
 
 SCRIPTING::~SCRIPTING()
 {
-    PyEval_RestoreThread( m_python_thread_state );
+    // Only restore/finalize if initialization succeeded
+    if( m_python_thread_state != nullptr )
+    {
+        PyEval_RestoreThread( m_python_thread_state );
 
-    try
-    {
-        pybind11::finalize_interpreter();
-    }
-    catch( const std::runtime_error& exc )
-    {
-        wxLogError( wxT( "Run time error '%s' occurred closing Python scripting" ), exc.what() );
+        try
+        {
+            pybind11::finalize_interpreter();
+        }
+        catch( const std::runtime_error& exc )
+        {
+            wxLogError( wxT( "Run time error '%s' occurred closing Python scripting" ), exc.what() );
+        }
     }
 }
 

@@ -88,6 +88,7 @@ std::optional<TOOLBAR_CONFIGURATION> SCH_EDIT_TOOLBAR_SETTINGS::DefaultToolbarCo
 
         config.AppendSeparator()
               .AppendAction( SCH_ACTIONS::showHierarchy )
+              .AppendAction( SCH_ACTIONS::showOllamaAgent )
               .AppendAction( ACTIONS::showProperties );
 
         if( ADVANCED_CFG::GetCfg().m_DrawBoundingBoxes )

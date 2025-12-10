@@ -22,11 +22,17 @@
 
 #include <widgets/wx_panel.h>
 #include <wx/string.h>
+#include <wx/event.h>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 class wxTextCtrl;
 class wxButton;
 class wxScrolledWindow;
 class wxBoxSizer;
+class wxWindow;
+class wxStaticText;
 class SCH_EDIT_FRAME;
 class SCH_OLLAMA_AGENT_TOOL;
 
@@ -60,14 +66,19 @@ public:
     /**
      * Set the tool instance for processing requests
      */
-    void SetTool( SCH_OLLAMA_AGENT_TOOL* aTool ) { m_tool = aTool; }
+    void SetTool( SCH_OLLAMA_AGENT_TOOL* aTool );
 
 private:
     void onSendButton( wxCommandEvent& aEvent );
     void onInputKeyDown( wxKeyEvent& aEvent );
     void sendMessage();
     void scrollToBottom();
-    void addMessageToChat( const wxString& aMessage, bool aIsUser );
+    void addMessageToChat( const wxString& aMessage, bool aIsUser, bool aIsThinking = false );
+    void removeThinkingMessage();
+    void CancelCurrentRequest();
+    void StartConnectionCheck();
+    void OnRequestCancelled( wxCommandEvent& aEvent );
+    void OnConnectionCheckResult( wxCommandEvent& aEvent );
 
     SCH_EDIT_FRAME* m_frame;
     SCH_OLLAMA_AGENT_TOOL* m_tool;
@@ -76,8 +87,31 @@ private:
     wxTextCtrl* m_inputCtrl;
     wxButton* m_sendButton;
     wxButton* m_clearButton;
+    wxButton* m_cancelButton;
+    wxStaticText* m_statusText;
     bool m_isProcessing;
+    std::thread m_requestThread;
+    std::thread m_connectionThread;
+    std::mutex m_threadMutex;
+    std::mutex m_connectionMutex;
+    wxWindow* m_thinkingBubble;      // Reference to the thinking message bubble
+    wxWindow* m_streamingBubble;     // Reference to the streaming response bubble
+    wxString m_streamingText;        // Accumulated streaming text
+    std::atomic<bool> m_cancelRequested;
+    
+    // Event IDs for async communication
+    enum
+    {
+        ID_RESPONSE_RECEIVED = wxID_HIGHEST + 1,
+        ID_REQUEST_FAILED,
+        ID_RESPONSE_PARTIAL,
+        ID_REQUEST_CANCELLED,
+        ID_CONNECTION_CHECK_RESULT
+    };
+    
+    void OnResponseReceived( wxCommandEvent& aEvent );
+    void OnRequestFailed( wxCommandEvent& aEvent );
+    void OnResponsePartial( wxCommandEvent& aEvent );
 };
 
 #endif // SCH_OLLAMA_AGENT_PANE_H
-

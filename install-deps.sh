@@ -1,4 +1,11 @@
 #!/bin/bash
+# ⚠️  NOTE: This script is for Linux (Debian/Ubuntu), NOT macOS!
+# 
+# For macOS, use the unified script instead:
+#   ./dev-build.sh
+# 
+# See BUILD_MACOS.md for macOS build instructions.
+#
 sudo apt-get update && sudo apt-get install -y \
   debhelper \
   cmake \

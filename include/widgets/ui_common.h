@@ -123,6 +123,19 @@ KICOMMON_API bool IsInputControlFocused( wxWindow* aFocus = nullptr );
  */
 KICOMMON_API bool IsInputControlEditable( wxWindow* aControl );
 
+/**
+ * Register a window that should suppress hotkeys when it (or one of its children) has focus.
+ *
+ * @param aWindow window to register
+ * @param aEditable true if the registered window allows editing user input
+ */
+KICOMMON_API void RegisterHotkeySuppressor( wxWindow* aWindow, bool aEditable = true );
+
+/**
+ * Remove a previously registered hotkey suppressor window.
+ */
+KICOMMON_API void UnregisterHotkeySuppressor( wxWindow* aWindow );
+
 KICOMMON_API bool IsModalDialogFocused();
 
 /**

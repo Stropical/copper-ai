@@ -30,8 +30,9 @@
 
 SCH_OLLAMA_AGENT_TOOL::SCH_OLLAMA_AGENT_TOOL() :
     SCH_TOOL_BASE<SCH_EDIT_FRAME>( "eeschema.OllamaAgentTool" ),
-    m_model( wxS( "llama2" ) )  // Default model
+    m_model( wxS( "qwen3:4b" ) )  // Default model
 {
+    initializeSystemPrompt();
 }
 
 
@@ -73,6 +74,7 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
 
     // Build prompt
     wxString prompt = BuildPrompt( userRequest );
+    const wxString& systemPrompt = GetSystemPrompt();
 
     // Initialize ollama client lazily if needed
     if( !m_ollama )
@@ -90,7 +92,7 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
 
     // Send to Ollama
     wxString response;
-    if( !m_ollama->ChatCompletion( m_model, prompt, response ) )
+    if( !m_ollama->ChatCompletion( m_model, prompt, response, systemPrompt ) )
     {
         DisplayError( m_frame, _( "Failed to communicate with Ollama server." ) );
         return 0;
@@ -134,16 +136,10 @@ OLLAMA_CLIENT* SCH_OLLAMA_AGENT_TOOL::GetOllama()
 
 wxString SCH_OLLAMA_AGENT_TOOL::BuildPrompt( const wxString& aUserRequest )
 {
-    wxString prompt = wxS( "You are an AI assistant helping to create electronic schematics in KiCad. " );
-    prompt += wxS( "When the user requests schematic operations, respond with simple commands in this format:\n" );
-    prompt += wxS( "- JUNCTION x y (add junction at position x, y in millimeters)\n" );
-    prompt += wxS( "- WIRE x1 y1 x2 y2 (add wire from x1,y1 to x2,y2 in millimeters)\n" );
-    prompt += wxS( "- LABEL x y \"text\" (add label at x,y with text)\n" );
-    prompt += wxS( "- TEXT x y \"text\" (add text at x,y)\n" );
-    prompt += wxS( "\nUser request: " );
-    prompt += aUserRequest;
-    prompt += wxS( "\n\nRespond with only the commands, one per line." );
-
+    wxString prompt;
+    prompt << wxS( "USER REQUEST:\n" ) << aUserRequest << wxS( "\n\n" );
+    prompt << wxS( "Remember to respond with TASKS, a blank line, then COMMANDS. " )
+           << wxS( "Emit TOOL <name> <json> lines if a tool invocation is required before COMMANDS.\n" );
     return prompt;
 }
 
@@ -162,8 +158,35 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
         if( line.IsEmpty() || line.StartsWith( wxS( "#" ) ) )
             continue;
 
+        wxString upperLine = line.Upper();
+
+        if( upperLine.StartsWith( wxS( "TOOL" ) ) )
+        {
+            wxString rest = line.Mid( 4 );
+            rest.Trim();
+            rest.Trim( false );
+
+            wxString toolName = rest.BeforeFirst( ' ' ).Trim();
+            wxString payload;
+
+            if( rest.Contains( wxS( " " ) ) )
+            {
+                payload = rest.AfterFirst( ' ' );
+                payload.Trim();
+                payload.Trim( false );
+            }
+
+            if( toolName.IsEmpty() )
+                continue;
+
+            if( ExecuteToolCommand( toolName, payload ) )
+                success = true;
+
+            continue;
+        }
+
         // Parse JUNCTION command
-        if( line.Upper().StartsWith( wxS( "JUNCTION" ) ) )
+        if( upperLine.StartsWith( wxS( "JUNCTION" ) ) )
         {
             double x, y;
             if( wxSscanf( line, wxS( "JUNCTION %lf %lf" ), &x, &y ) == 2 )
@@ -174,7 +197,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
             }
         }
         // Parse WIRE command
-        else if( line.Upper().StartsWith( wxS( "WIRE" ) ) )
+        else if( upperLine.StartsWith( wxS( "WIRE" ) ) )
         {
             double x1, y1, x2, y2;
             if( wxSscanf( line, wxS( "WIRE %lf %lf %lf %lf" ), &x1, &y1, &x2, &y2 ) == 4 )
@@ -186,7 +209,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
             }
         }
         // Parse LABEL command
-        else if( line.Upper().StartsWith( wxS( "LABEL" ) ) )
+        else if( upperLine.StartsWith( wxS( "LABEL" ) ) )
         {
             double x, y;
             wxString text;
@@ -217,7 +240,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
             }
         }
         // Parse TEXT command
-        else if( line.Upper().StartsWith( wxS( "TEXT" ) ) )
+        else if( upperLine.StartsWith( wxS( "TEXT" ) ) )
         {
             double x, y;
             wxString text;
@@ -252,9 +275,58 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 }
 
 
+void SCH_OLLAMA_AGENT_TOOL::initializeSystemPrompt()
+{
+    m_toolCatalog.clear();
+    m_toolCatalog.emplace_back( TOOL_DESCRIPTOR{
+            wxS( "mock.selection_inspector" ),
+            _( "Mock tool that inspects the current selection and returns a JSON summary." ),
+            wxS( "TOOL mock.selection_inspector {\"scope\":\"sheet\"}" ) } );
+
+    wxString prompt;
+    prompt << wxS( "You are an AI assistant helping to create and document KiCad schematics. " )
+           << wxS( "Always respond using two sections:\n" )
+           << wxS( "TASKS:\n- bullet list explaining how you will update the schematic\n\n" )
+           << wxS( "COMMANDS:\n- one command per line using the supported syntax (JUNCTION, WIRE, LABEL, TEXT).\n" )
+           << wxS( "Never mix prose inside COMMANDS.\n" );
+
+    if( !m_toolCatalog.empty() )
+    {
+        prompt << wxS( "\nAvailable tools:\n" );
+
+        for( const TOOL_DESCRIPTOR& tool : m_toolCatalog )
+        {
+            prompt << wxS( "- " ) << tool.name << wxS( ": " ) << tool.description << wxS( "\n  Usage: " )
+                   << tool.usage << wxS( "\n" );
+        }
+
+        prompt << wxS( "When you must call a tool, emit a line that begins with TOOL <name> followed by a JSON "
+                        "payload describing the input. After the tool call, continue with TASKS/COMMANDS.\n" );
+    }
+
+    prompt << wxS( "\nKeep the tone concise and professional. Mention units in millimeters when coordinates "
+                    "are required.\n" );
+
+    m_systemPrompt = prompt;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload )
+{
+    if( aToolName.CmpNoCase( wxS( "mock.selection_inspector" ) ) == 0 )
+    {
+        wxLogMessage( wxS( "[OllamaAgent] mock tool '%s' invoked with payload: %s" ),
+                      aToolName.wx_str(), aPayload.wx_str() );
+        return true;
+    }
+
+    wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), aToolName.wx_str() );
+    return false;
+}
+
+
 void SCH_OLLAMA_AGENT_TOOL::setTransitions()
 {
     Go( &SCH_OLLAMA_AGENT_TOOL::ProcessRequest, SCH_ACTIONS::ollamaAgentRequest.MakeEvent() );
     Go( &SCH_OLLAMA_AGENT_TOOL::ShowAgentDialog, SCH_ACTIONS::ollamaAgentDialog.MakeEvent() );
 }
-

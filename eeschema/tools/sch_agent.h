@@ -95,7 +95,6 @@ public:
 
 private:
     SCH_EDIT_FRAME* m_frame;
-    SCH_SCREEN* m_screen;
     std::unique_ptr<SCH_COMMIT> m_commit;
     bool m_inBatch;
 };

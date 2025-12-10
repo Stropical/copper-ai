@@ -798,6 +798,12 @@ void SCH_EDIT_FRAME::setupUIConditions()
 
     mgr->SetConditions( SCH_ACTIONS::showSearch,           CHECK( searchPaneCond ) );
     mgr->SetConditions( SCH_ACTIONS::showHierarchy,        CHECK( hierarchyNavigatorCond ) );
+    
+    auto ollamaAgentCond = [this]( const SELECTION& aSel )
+    {
+        return m_auimgr.GetPane( OllamaAgentPaneName() ).IsShown();
+    };
+    mgr->SetConditions( SCH_ACTIONS::showOllamaAgent,       CHECK( ollamaAgentCond ) );
     mgr->SetConditions( SCH_ACTIONS::showNetNavigator,     CHECK( netNavigatorCond ) );
     mgr->SetConditions( ACTIONS::showProperties,           CHECK( propertiesCond ) );
     mgr->SetConditions( SCH_ACTIONS::showDesignBlockPanel, CHECK( designBlockCond ) );

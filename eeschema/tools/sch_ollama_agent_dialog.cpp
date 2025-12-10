@@ -301,7 +301,8 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
     if( m_tool )
     {
         wxString prompt = m_tool->BuildPrompt( message );
-        success = m_tool->GetOllama()->ChatCompletion( m_tool->GetModel(), prompt, response );
+        success = m_tool->GetOllama()->ChatCompletion( m_tool->GetModel(), prompt, response,
+                                                       m_tool->GetSystemPrompt() );
         
         if( success )
         {
@@ -332,4 +333,3 @@ void SCH_OLLAMA_AGENT_DIALOG::scrollToBottom()
     m_chatPanel->Scroll( 0, size.GetHeight() );
     m_chatPanel->Refresh();
 }
-

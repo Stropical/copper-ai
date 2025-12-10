@@ -27,7 +27,6 @@
 
 SCH_AGENT::SCH_AGENT( SCH_EDIT_FRAME* aFrame ) :
     m_frame( aFrame ),
-    m_screen( aFrame->GetScreen() ),
     m_commit( std::make_unique<SCH_COMMIT>( aFrame ) ),
     m_inBatch( false )
 {
@@ -36,11 +35,13 @@ SCH_AGENT::SCH_AGENT( SCH_EDIT_FRAME* aFrame ) :
 
 bool SCH_AGENT::AddJunction( const VECTOR2I& aPos )
 {
-    if( !m_screen )
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    if( !screen )
         return false;
 
     std::unique_ptr<SCH_JUNCTION> junction = std::make_unique<SCH_JUNCTION>( aPos );
-    m_commit->Add( junction.release(), m_screen );
+    junction->SetParent( screen ); // Must set parent before adding to commit
+    m_commit->Add( junction.release(), screen );
 
     if( !m_inBatch )
     {
@@ -54,7 +55,8 @@ bool SCH_AGENT::AddJunction( const VECTOR2I& aPos )
 
 bool SCH_AGENT::AddWire( const VECTOR2I& aStart, const VECTOR2I& aEnd )
 {
-    if( !m_screen )
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    if( !screen )
         return false;
 
     std::unique_ptr<SCH_LINE> wire = std::make_unique<SCH_LINE>();
@@ -62,8 +64,9 @@ bool SCH_AGENT::AddWire( const VECTOR2I& aStart, const VECTOR2I& aEnd )
     wire->SetEndPoint( aEnd );
     wire->SetLayer( LAYER_WIRE );
     wire->SetStroke( STROKE_PARAMS() );
+    wire->SetParent( screen ); // Must set parent before adding to commit
 
-    m_commit->Add( wire.release(), m_screen );
+    m_commit->Add( wire.release(), screen );
 
     if( !m_inBatch )
     {
@@ -77,14 +80,16 @@ bool SCH_AGENT::AddWire( const VECTOR2I& aStart, const VECTOR2I& aEnd )
 
 bool SCH_AGENT::AddLabel( const VECTOR2I& aPos, const wxString& aText )
 {
-    if( !m_screen )
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    if( !screen )
         return false;
 
     std::unique_ptr<SCH_LABEL> label = std::make_unique<SCH_LABEL>();
     label->SetPosition( aPos );
     label->SetText( aText );
+    label->SetParent( screen ); // Must set parent before adding to commit
 
-    m_commit->Add( label.release(), m_screen );
+    m_commit->Add( label.release(), screen );
 
     if( !m_inBatch )
     {
@@ -98,14 +103,16 @@ bool SCH_AGENT::AddLabel( const VECTOR2I& aPos, const wxString& aText )
 
 bool SCH_AGENT::AddText( const VECTOR2I& aPos, const wxString& aText )
 {
-    if( !m_screen )
+    SCH_SCREEN* screen = m_frame->GetScreen();
+    if( !screen )
         return false;
 
     std::unique_ptr<SCH_TEXT> text = std::make_unique<SCH_TEXT>();
     text->SetPosition( aPos );
     text->SetText( aText );
+    text->SetParent( screen ); // Must set parent before adding to commit
 
-    m_commit->Add( text.release(), m_screen );
+    m_commit->Add( text.release(), screen );
 
     if( !m_inBatch )
     {

@@ -35,7 +35,8 @@
 
 
 ACTION_MANAGER::ACTION_MANAGER( TOOL_MANAGER* aToolManager ) :
-    m_toolMgr( aToolManager )
+    m_toolMgr( aToolManager ),
+    m_hotkeysEnabled( true )
 {
     // Register known actions
     std::list<TOOL_ACTION*>& actionList = GetActionList();
@@ -142,6 +143,9 @@ TOOL_ACTION* ACTION_MANAGER::FindAction( const std::string& aActionName ) const
 
 bool ACTION_MANAGER::RunHotKey( int aHotKey ) const
 {
+    if( !m_hotkeysEnabled )
+        return false;
+
     int key = aHotKey & ~MD_MODIFIER_MASK;
     int mod = aHotKey & MD_MODIFIER_MASK;
 
@@ -249,6 +253,13 @@ bool ACTION_MANAGER::RunHotKey( int aHotKey ) const
                 KeyNameFromKeyCode( aHotKey ) );
 
     return false;
+}
+
+
+void ACTION_MANAGER::SetHotkeysEnabled( bool aEnabled )
+{
+    m_hotkeysEnabled = aEnabled;
+    std::cout << "ACTION_MANAGER::SetHotkeysEnabled: " << aEnabled << std::endl;
 }
 
 

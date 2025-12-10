@@ -135,6 +135,13 @@ public:
     bool RunHotKey( int aHotKey ) const;
 
     /**
+     * Enable or disable hotkey processing globally.  When disabled, RunHotKey()
+     * will always return false so accelerators fall through to widgets with focus.
+     */
+    void SetHotkeysEnabled( bool aEnabled );
+    bool HotkeysEnabled() const { return m_hotkeysEnabled; }
+
+    /**
      * Return the hot key associated with a given action or 0 if there is none.
      *
      * @param aAction is the queried action.
@@ -202,6 +209,8 @@ private:
     /// Map the command ID that wx uses for the action to the UI conditions for the
     /// menu/toolbar items
     std::map<int, ACTION_CONDITIONS> m_uiConditions;
+
+    bool m_hotkeysEnabled;
 };
 
 #endif /* ACTION_MANAGER_H_ */

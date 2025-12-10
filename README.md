@@ -4,6 +4,8 @@ For specific documentation about [building KiCad](https://dev-docs.kicad.org/en/
 and guidelines, and source code documentation see the
 [Developer Documentation](https://dev-docs.kicad.org) website.
 
+**macOS Users**: See [BUILD_MACOS.md](BUILD_MACOS.md) for instructions on using the unified `dev-build.sh` script.
+
 You may also take a look into the [Wiki](https://gitlab.com/kicad/code/kicad/-/wikis/home),
 the [contribution guide](https://dev-docs.kicad.org/en/contribute/).
 

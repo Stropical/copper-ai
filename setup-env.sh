@@ -1,4 +1,9 @@
 #!/bin/bash
+# ⚠️  NOTE: This script is for Linux, NOT macOS!
+# 
+# For macOS, use the unified script instead:
+#   ./dev-build.sh
+#
 # Source this file to set up the environment for running KiCad from ~/bin/kicad
 # Usage: source setup-env.sh
 

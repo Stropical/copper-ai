@@ -20,9 +20,11 @@
 #ifndef OLLAMA_CLIENT_H
 #define OLLAMA_CLIENT_H
 
+#include <functional>
 #include <wx/string.h>
 #include <memory>
 #include <string>
+#include <atomic>
 
 class KICAD_CURL_EASY;
 
@@ -33,7 +35,7 @@ class KICAD_CURL_EASY;
 class OLLAMA_CLIENT
 {
 public:
-    OLLAMA_CLIENT( const wxString& aBaseUrl = wxS( "http://localhost:11434" ) );
+    OLLAMA_CLIENT( const wxString& aBaseUrl = wxS( "http://192.168.177.144:11434" ) );
     ~OLLAMA_CLIENT();
 
     /**
@@ -43,7 +45,14 @@ public:
      * @param aResponse Output response text
      * @return true if successful
      */
-    bool ChatCompletion( const wxString& aModel, const wxString& aPrompt, wxString& aResponse );
+    bool ChatCompletion( const wxString& aModel, const wxString& aPrompt, wxString& aResponse,
+                         const wxString& aSystemPrompt = wxString() );
+
+    using StreamCallback = std::function<void( const wxString& )>;
+    bool StreamChatCompletion( const wxString& aModel, const wxString& aPrompt,
+                               StreamCallback aChunkCallback, wxString& aResponse,
+                               const std::atomic<bool>* aCancelFlag = nullptr,
+                               const wxString& aSystemPrompt = wxString() );
 
     /**
      * Check if Ollama server is available
@@ -67,4 +76,3 @@ private:
 };
 
 #endif // OLLAMA_CLIENT_H
-

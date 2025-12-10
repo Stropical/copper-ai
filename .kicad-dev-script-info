@@ -1,0 +1,50 @@
+# KiCad Development Script Information
+
+## ⭐ USE THIS SCRIPT: dev-build.sh
+
+This is the **ONLY** script you need for building and running KiCad on macOS.
+
+### Quick Reference:
+
+```bash
+# Build and run (most common)
+./dev-build.sh
+
+# Just build
+./dev-build.sh build
+
+# Just run (skip build)
+./dev-build.sh run
+
+# Clean everything
+./dev-build.sh clean
+
+# Reconfigure CMake
+./dev-build.sh configure
+```
+
+### Key Features:
+
+✅ **Single build directory**: Always uses `build/release/` - no confusion!
+✅ **Automatic configuration**: Sets up CMake on first run
+✅ **Incremental builds**: Only rebuilds what changed
+✅ **Runs from build dir**: No need to install, runs directly from build directory
+✅ **Auto-detects CPU cores**: Uses optimal parallelism
+✅ **Clear output**: Shows exactly what it's doing
+
+### Build Directory:
+
+- **Always uses**: `build/release/` (relative to repo root)
+- **KiCad binary**: `build/release/kicad/KiCad.app/Contents/MacOS/kicad`
+- **Never gets confused**: Always builds and runs from the same place
+
+### Documentation:
+
+See [BUILD_MACOS.md](BUILD_MACOS.md) for full instructions.
+
+### Old Scripts:
+
+- `setup-env.sh` - For Linux only (not macOS)
+- `install-deps.sh` - For Linux only (not macOS)
+- `build/release/run_kicad.sh` - Old script, use `dev-build.sh` instead
+

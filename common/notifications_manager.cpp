@@ -274,7 +274,21 @@ void NOTIFICATIONS_MANAGER::Load()
 {
     nlohmann::json saved_json;
 
+    // Check if file exists first
+    if( !wxFileExists( m_destFileName.GetFullPath() ) )
+    {
+        // No file exists, start with empty notifications
+        return;
+    }
+
     std::ifstream saved_json_stream( m_destFileName.GetFullPath().fn_str() );
+
+    // Check if file opened successfully
+    if( !saved_json_stream.is_open() )
+    {
+        // Failed to open file, start with empty notifications
+        return;
+    }
 
     try
     {
@@ -282,9 +296,15 @@ void NOTIFICATIONS_MANAGER::Load()
 
         m_notifications = saved_json.get<std::vector<NOTIFICATION>>();
     }
-    catch( std::exception& )
+    catch( const std::exception& e )
     {
         // failed to load the json, which is fine, default to no notifications
+        // Silently ignore - corrupted file will be recreated on next save
+    }
+    catch( ... )
+    {
+        // Catch any other exceptions (including nlohmann json exceptions that might not inherit properly)
+        // Silently ignore - corrupted file will be recreated on next save
     }
 
     if( wxGetEnv( wxT( "KICAD_TEST_NOTI" ), nullptr ) )
