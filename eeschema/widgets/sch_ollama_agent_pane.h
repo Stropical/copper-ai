@@ -27,8 +27,9 @@
 #include <mutex>
 #include <atomic>
 
-class wxTextCtrl;
+class wxStyledTextCtrl;
 class wxButton;
+class SCINTILLA_TRICKS;
 class wxScrolledWindow;
 class wxBoxSizer;
 class wxWindow;
@@ -70,7 +71,6 @@ public:
 
 private:
     void onSendButton( wxCommandEvent& aEvent );
-    void onInputKeyDown( wxKeyEvent& aEvent );
     void sendMessage();
     void scrollToBottom();
     void addMessageToChat( const wxString& aMessage, bool aIsUser, bool aIsThinking = false );
@@ -84,7 +84,8 @@ private:
     SCH_OLLAMA_AGENT_TOOL* m_tool;
     wxScrolledWindow* m_chatPanel;
     wxBoxSizer* m_chatSizer;
-    wxTextCtrl* m_inputCtrl;
+    wxStyledTextCtrl* m_inputCtrl;
+    SCINTILLA_TRICKS* m_scintillaTricks;
     wxButton* m_sendButton;
     wxButton* m_clearButton;
     wxButton* m_cancelButton;

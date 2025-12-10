@@ -44,6 +44,7 @@
 #include <string_utils.h>
 #include <wx/hyperlink.h>
 #include <unordered_map>
+#include <trace_helpers.h>
 
 
 const wxString KIUI::s_FocusStealableInputName = wxS( "KI_NOFOCUS" );
@@ -56,20 +57,41 @@ namespace
     {
         wxWindow* current = aFocus;
 
+        wxLogTrace( kicadTraceKeyEvent,
+                    wxS( "findHotkeySuppressor: starting from %p (class: %s)" ),
+                    current,
+                    current ? current->GetClassInfo()->GetClassName() : wxS( "null" ) );
+
         while( current )
         {
             auto entry = s_hotkeySuppressors.find( current );
 
             if( entry != s_hotkeySuppressors.end() )
             {
+                wxLogTrace( kicadTraceKeyEvent,
+                            wxS( "findHotkeySuppressor: found at %p (editable: %d, class: %s)" ),
+                            current,
+                            entry->second,
+                            current->GetClassInfo()->GetClassName() );
+
                 if( aEditable )
                     *aEditable = entry->second;
 
                 return current;
             }
 
-            current = current->GetParent();
+            wxWindow* parent = current->GetParent();
+
+            wxLogTrace( kicadTraceKeyEvent,
+                        wxS( "findHotkeySuppressor: checking parent %p (class: %s)" ),
+                        parent,
+                        parent ? parent->GetClassInfo()->GetClassName() : wxS( "null" ) );
+
+            current = parent;
         }
+
+        wxLogTrace( kicadTraceKeyEvent,
+                    wxS( "findHotkeySuppressor: no suppressor found" ) );
 
         if( aEditable )
             *aEditable = false;

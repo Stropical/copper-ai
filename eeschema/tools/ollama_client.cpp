@@ -70,18 +70,19 @@ namespace
                 aContext.callback( wxString::FromUTF8( aText ) );
             };
 
+            // Ollama /api/generate streaming mode returns one JSON object per line.
+            // Each object typically has a "response" field that contains the next
+            // piece of text and a "done" flag when streaming is finished.
             if( chunk.contains( "response" ) && chunk["response"].is_string() )
             {
                 std::string response = chunk["response"].get<std::string>();
-                if( response.size() > aContext.lastResponse.size() )
+                // Treat the "response" value as a delta chunk and append it to the
+                // accumulated text. Some implementations may emit empty chunks near
+                // completion, so guard against that.
+                if( !response.empty() )
                 {
-                    std::string addition = response.substr( aContext.lastResponse.size() );
-                    aContext.lastResponse = response;
-                    sendChunk( addition );
-                }
-                else
-                {
-                    aContext.lastResponse = response;
+                    aContext.lastResponse += response;
+                    sendChunk( response );
                 }
             }
             else if( chunk.contains( "choices" ) && chunk["choices"].is_array() && !chunk["choices"].empty() )
@@ -130,20 +131,15 @@ namespace
             if( !line.empty() && line.back() == '\r' )
                 line.pop_back();
 
-            if( line.empty() )
-            {
-                ProcessStreamEvent( *context );
-                continue;
-            }
+            std::string trimmed = TrimWhitespace( line );
 
-            constexpr const char* dataPrefix = "data:";
-            if( line.rfind( dataPrefix, 0 ) == 0 )
-            {
-                std::string value = TrimWhitespace( line.substr( std::strlen( dataPrefix ) ) );
-                if( !context->eventPayload.empty() )
-                    context->eventPayload += "\n";
-                context->eventPayload += value;
-            }
+            if( trimmed.empty() )
+                continue;
+
+            // For Ollama /api/generate, each non-empty line is a complete JSON object.
+            // Store it as the current payload and process immediately.
+            context->eventPayload = trimmed;
+            ProcessStreamEvent( *context );
         }
 
         return realsize;
@@ -241,7 +237,8 @@ bool OLLAMA_CLIENT::StreamChatCompletion( const wxString& aModel, const wxString
     wxString url = m_baseUrl + wxS( "/api/generate" );
     streamCurl.SetURL( url.ToUTF8().data() );
     streamCurl.SetHeader( "Content-Type", "application/json" );
-    streamCurl.SetHeader( "Accept", "text/event-stream" );
+    // Ollama streams newline-delimited JSON rather than classic SSE.
+    streamCurl.SetHeader( "Accept", "application/json" );
     streamCurl.SetPostFields( requestBody );
 
     if( aCancelFlag )

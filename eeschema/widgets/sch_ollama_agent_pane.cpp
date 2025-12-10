@@ -34,6 +34,8 @@
 #include <wx/dcbuffer.h>
 #include <wx/thread.h>
 #include <widgets/ui_common.h>
+#include <wx/stc/stc.h>
+#include <scintilla_tricks.h>
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -271,17 +273,46 @@ SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
     composerPanel->SetForegroundColour( CURSOR_BORDER );
     wxBoxSizer* composerSizer = new wxBoxSizer( wxHORIZONTAL );
 
-    m_inputCtrl = new wxTextCtrl( composerPanel, wxID_ANY, wxEmptyString,
-                                  wxDefaultPosition, wxSize( -1, 90 ),
-                                  wxTE_MULTILINE | wxTE_PROCESS_ENTER | wxTE_NO_VSCROLL | wxBORDER_NONE );
-    KIUI::RegisterHotkeySuppressor( m_inputCtrl );
+    // Set up exactly like Text Properties dialog
+    m_inputCtrl = new wxStyledTextCtrl( composerPanel, wxID_ANY,
+                                        wxDefaultPosition, wxSize( -1, 90 ),
+                                        wxBORDER_NONE );
     m_inputCtrl->SetBackgroundColour( CURSOR_SURFACE );
-    m_inputCtrl->SetForegroundColour( CURSOR_PRIMARY );
+    m_inputCtrl->SetCaretForeground( CURSOR_PRIMARY );
+    m_inputCtrl->StyleSetForeground( wxSTC_STYLE_DEFAULT, CURSOR_PRIMARY );
     wxFont inputFont = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
     inputFont.SetPointSize( 11 );
-    m_inputCtrl->SetFont( inputFont );
+    m_inputCtrl->StyleSetFont( wxSTC_STYLE_DEFAULT, inputFont );
     m_inputCtrl->SetMinSize( wxSize( -1, 90 ) );
-    m_inputCtrl->SetHint( _( "Type your request here... (Ctrl/Cmd+Enter to send)" ) );
+
+    m_inputCtrl->SetEOLMode( wxSTC_EOL_LF );
+
+#ifdef _WIN32
+    // Without this setting, on Windows, some esoteric unicode chars create display issue
+    // in a wxStyledTextCtrl.
+    m_inputCtrl->SetTechnology( wxSTC_TECHNOLOGY_DIRECTWRITE );
+#endif
+
+    // Set up SCINTILLA_TRICKS exactly like Text Properties dialog
+    m_scintillaTricks = new SCINTILLA_TRICKS( m_inputCtrl, wxT( "" ), false,
+            // onAcceptFn - Ctrl/Cmd+Enter or Shift+Enter to send
+            [this]( wxKeyEvent& aEvent )
+            {
+                if( ( aEvent.GetModifiers() == wxMOD_CONTROL || aEvent.GetModifiers() == wxMOD_CMD ) &&
+                    ( aEvent.GetKeyCode() == WXK_RETURN || aEvent.GetKeyCode() == WXK_NUMPAD_ENTER ) )
+                {
+                    sendMessage();
+                }
+            },
+            // onCharFn - no autocomplete needed
+            []( wxStyledTextEvent& ) {} );
+
+    // A hack which causes Scintilla to auto-size the text editor canvas
+    // See: https://github.com/jacobslusser/ScintillaNET/issues/216
+    m_inputCtrl->SetScrollWidth( 1 );
+    m_inputCtrl->SetScrollWidthTracking( true );
+
+    KIUI::RegisterHotkeySuppressor( m_inputCtrl );
 
     m_sendButton = new wxButton( composerPanel, wxID_OK, _( "Send" ) );
     m_sendButton->SetDefault();
@@ -327,54 +358,20 @@ SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
     Bind( wxEVT_COMMAND_TEXT_UPDATED, &SCH_OLLAMA_AGENT_PANE::OnRequestCancelled, this, ID_REQUEST_CANCELLED );
     Bind( wxEVT_COMMAND_TEXT_UPDATED, &SCH_OLLAMA_AGENT_PANE::OnConnectionCheckResult, this, ID_CONNECTION_CHECK_RESULT );
     
-    // Handle key events - prevent hotkey propagation to main editor
-    // Use CHAR_HOOK to catch events before they reach the tool dispatcher
-    m_inputCtrl->Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& aEvent )
-    {
-        // Stop all key events from propagating to parent (main editor)
-        // This prevents hotkeys like 't' and 'l' from triggering
-        aEvent.StopPropagation();
-        // Skip to allow text control to process the event normally
-        aEvent.Skip();
-    } );
-    
-    // KEY_DOWN for Ctrl+Enter handling and to stop propagation
-    m_inputCtrl->Bind( wxEVT_KEY_DOWN, &SCH_OLLAMA_AGENT_PANE::onInputKeyDown, this );
-    
-    // CHAR event - also stop propagation as backup
-    m_inputCtrl->Bind( wxEVT_CHAR, [this]( wxKeyEvent& aEvent )
-    {
-        // Stop propagation to prevent hotkeys in main editor
-        aEvent.StopPropagation();
-        aEvent.Skip(); // But still process for the text control
-    } );
-    
-    // Also bind at panel level to catch any events that escape
-    Bind( wxEVT_CHAR_HOOK, [this]( wxKeyEvent& aEvent )
-    {
-        wxWindow* focus = wxWindow::FindFocus();
-        // If input has focus, stop propagation
-        if( m_inputCtrl && ( focus == m_inputCtrl || m_inputCtrl->IsDescendant( focus ) ) )
-        {
-            aEvent.StopPropagation();
-        }
-        aEvent.Skip();
-    } );
-    
-    // Additional safety: catch all keyboard events at the input control level
-    m_inputCtrl->Bind( wxEVT_KEY_UP, []( wxKeyEvent& aEvent )
-    {
-        aEvent.StopPropagation();
-        aEvent.Skip();
-    } );
-    
-    // Focus on input
+    // Focus on input (exactly like Text Properties dialog)
     m_inputCtrl->SetFocus();
+
+    // Register the entire pane as a hotkey suppressor so any focus within the pane
+    // (including buttons, etc.) will suppress editor hotkeys.
+    KIUI::RegisterHotkeySuppressor( this, true );
 }
 
 
 SCH_OLLAMA_AGENT_PANE::~SCH_OLLAMA_AGENT_PANE()
 {
+    delete m_scintillaTricks;
+
+    KIUI::UnregisterHotkeySuppressor( this );
     KIUI::UnregisterHotkeySuppressor( m_inputCtrl );
 
     // Wait for any running thread to finish
@@ -592,28 +589,13 @@ void SCH_OLLAMA_AGENT_PANE::onSendButton( wxCommandEvent& aEvent )
 }
 
 
-void SCH_OLLAMA_AGENT_PANE::onInputKeyDown( wxKeyEvent& aEvent )
-{
-    // Ctrl+Enter or Cmd+Enter to send
-    if( ( aEvent.GetModifiers() == wxMOD_CONTROL || aEvent.GetModifiers() == wxMOD_CMD ) &&
-        aEvent.GetKeyCode() == WXK_RETURN )
-    {
-        sendMessage();
-        aEvent.Skip(); // Allow normal processing
-    }
-    else
-    {
-        // For all other keys, stop propagation to prevent hotkeys in main editor
-        // This is critical - prevents single-letter hotkeys from triggering
-        aEvent.StopPropagation();
-        aEvent.Skip(); // But still process for the text control
-    }
-}
+
+
 
 
 void SCH_OLLAMA_AGENT_PANE::sendMessage()
 {
-    wxString message = m_inputCtrl->GetValue().Trim();
+    wxString message = m_inputCtrl->GetText().Trim();
     
     if( message.IsEmpty() || m_isProcessing || !m_tool )
         return;
@@ -634,7 +616,7 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
     m_streamingText.clear();
     
     // Clear input
-    m_inputCtrl->Clear();
+    m_inputCtrl->ClearAll();
     m_inputCtrl->SetFocus();
     
     m_isProcessing = true;

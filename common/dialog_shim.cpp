@@ -377,6 +377,7 @@ bool DIALOG_SHIM::Show( bool show )
         m_userResized = false;
 
         KIPLATFORM::UI::EnsureVisible( this );
+        KIUI::RegisterHotkeySuppressor( this, true );
     }
     else
     {
@@ -392,6 +393,7 @@ bool DIALOG_SHIM::Show( bool show )
 
         if( m_parent )
             m_parent->SetFocus();
+        KIUI::UnregisterHotkeySuppressor( this );
     }
 
     return ret;

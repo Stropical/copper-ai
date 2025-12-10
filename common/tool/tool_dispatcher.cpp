@@ -592,9 +592,20 @@ void TOOL_DISPATCHER::DispatchWxEvent( wxEvent& aEvent )
 
         keyIsEscape = ( ke->GetKeyCode() == WXK_ESCAPE );
 
+        wxLogTrace( kicadTraceKeyEvent,
+                    wxS( "TOOL_DISPATCHER::DispatchWxEvent key focus: %p (name: %s, class: %s)" ),
+                    focus,
+                    focus ? focus->GetName().wx_str() : wxS( "<none>" ),
+                    focus ? focus->GetClassInfo()->GetClassName() : wxS( "<none>" ) );
+
         if( KIUI::IsInputControlFocused( focus ) )
         {
             bool enabled = KIUI::IsInputControlEditable( focus );
+
+            wxLogTrace( kicadTraceKeyEvent,
+                        wxS( "TOOL_DISPATCHER::DispatchWxEvent suppressing hotkey: "
+                             "input focused, editable=%d" ),
+                        enabled );
 
             // Never process key events for tools when a text entry has focus
             if( enabled )
@@ -608,6 +619,12 @@ void TOOL_DISPATCHER::DispatchWxEvent( wxEvent& aEvent )
                 aEvent.Skip();
                 return;
             }
+        }
+        else
+        {
+            wxLogTrace( kicadTraceKeyEvent,
+                        wxS( "TOOL_DISPATCHER::DispatchWxEvent not suppressing hotkey: "
+                             "input control not focused" ) );
         }
 
         evt = GetToolEvent( ke, &keyIsSpecial );
