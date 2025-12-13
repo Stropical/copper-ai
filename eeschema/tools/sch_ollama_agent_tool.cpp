@@ -19,6 +19,7 @@
 
 #include "sch_ollama_agent_tool.h"
 #include "sch_ollama_agent_dialog.h"
+#include "sch_ollama_agent_prompt.h"
 #include <sch_edit_frame.h>
 #include <dialogs/dialog_text_entry.h>
 #include <confirm.h>
@@ -31,10 +32,14 @@
 #include <sch_label.h>
 #include <sch_text.h>
 #include <sch_screen.h>
+#include <sch_symbol.h>
+#include <sch_pin.h>
+#include <sch_field.h>
+#include <sch_connection.h>
 #include <nlohmann/json.hpp>
+#include <set>
 
 using json = nlohmann::json;
-#include <sch_symbol.h>
 #include <sch_commit.h>
 #include <lib_id.h>
 
@@ -154,11 +159,14 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
     if( !screen )
         return wxEmptyString;
 
+    SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+
     wxString content;
     content << wxS( "CURRENT SCHEMATIC CONTENT:\n" );
     content << wxS( "Sheet: " ) << m_frame->GetFullScreenDesc() << wxS( "\n\n" );
 
     // Collect items by type for organized output
+    std::vector<SCH_SYMBOL*> symbols;
     std::vector<SCH_JUNCTION*> junctions;
     std::vector<SCH_LINE*> wires;
     std::vector<SCH_LABEL*> labels;
@@ -168,6 +176,9 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
     {
         switch( item->Type() )
         {
+        case SCH_SYMBOL_T:
+            symbols.push_back( static_cast<SCH_SYMBOL*>( item ) );
+            break;
         case SCH_JUNCTION_T:
             junctions.push_back( static_cast<SCH_JUNCTION*>( item ) );
             break;
@@ -189,6 +200,80 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         }
     }
 
+    // Format symbols/components with detailed information
+    if( !symbols.empty() )
+    {
+        content << wxS( "Components:\n" );
+        for( SCH_SYMBOL* symbol : symbols )
+        {
+            VECTOR2I pos = symbol->GetPosition();
+            double x_mm = schIUScale.IUTomm( pos.x );
+            double y_mm = schIUScale.IUTomm( pos.y );
+            
+            wxString ref = symbol->GetRef( &sheet, true );
+            wxString libId = symbol->GetLibId().Format();
+            int unit = symbol->GetUnit();
+            int bodyStyle = symbol->GetBodyStyle();
+            
+            content << wxString::Format( wxS( "  - Component %s (%s) at (%.2f, %.2f) mm\n" ),
+                                        ref, libId, x_mm, y_mm );
+            
+            if( unit > 1 || bodyStyle > 1 )
+            {
+                content << wxString::Format( wxS( "    Unit: %d, Body Style: %d\n" ), unit, bodyStyle );
+            }
+            
+            // Get fields (value, footprint, etc.)
+            SCH_FIELDS fields = symbol->GetFields();
+            bool hasFields = false;
+            for( const SCH_FIELD& field : fields )
+            {
+                if( field.GetText().IsEmpty() )
+                    continue;
+                    
+                wxString fieldName = field.GetName();
+                if( fieldName.IsEmpty() )
+                    fieldName = wxS( "Value" ); // Default field name
+                    
+                if( !hasFields )
+                {
+                    content << wxS( "    Fields:\n" );
+                    hasFields = true;
+                }
+                content << wxString::Format( wxS( "      %s: %s\n" ), fieldName, field.GetText() );
+            }
+            
+            // Get pins with their positions and net connections
+            std::vector<SCH_PIN*> pins = symbol->GetPins( &sheet );
+            if( !pins.empty() )
+            {
+                content << wxS( "    Pins:\n" );
+                for( SCH_PIN* pin : pins )
+                {
+                    VECTOR2I pinPos = pin->GetPosition();
+                    double pinX_mm = schIUScale.IUTomm( pinPos.x );
+                    double pinY_mm = schIUScale.IUTomm( pinPos.y );
+                    wxString pinName = pin->GetShownName();
+                    wxString pinNumber = pin->GetShownNumber();
+                    
+                    // Get net connection if available
+                    wxString netName = wxS( "<unconnected>" );
+                    if( SCH_CONNECTION* conn = pin->Connection( &sheet ) )
+                    {
+                        netName = conn->Name();
+                        if( netName.IsEmpty() )
+                            netName = wxS( "<unnamed net>" );
+                    }
+                    
+                    content << wxString::Format( wxS( "      Pin %s (%s) at (%.2f, %.2f) mm -> Net: %s\n" ),
+                                                pinName, pinNumber, pinX_mm, pinY_mm, netName );
+                }
+            }
+            content << wxS( "\n" );
+        }
+        content << wxS( "\n" );
+    }
+
     // Format junctions
     if( !junctions.empty() )
     {
@@ -198,7 +283,23 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
             VECTOR2I pos = junction->GetPosition();
             double x_mm = schIUScale.IUTomm( pos.x );
             double y_mm = schIUScale.IUTomm( pos.y );
-            content << wxString::Format( wxS( "  - Junction at (%.2f, %.2f) mm\n" ), x_mm, y_mm );
+            
+            // Get net name if available
+            wxString netName = wxS( "" );
+            if( SCH_CONNECTION* conn = junction->Connection( &sheet ) )
+            {
+                netName = conn->Name();
+            }
+            
+            if( !netName.IsEmpty() )
+            {
+                content << wxString::Format( wxS( "  - Junction at (%.2f, %.2f) mm on net: %s\n" ),
+                                            x_mm, y_mm, netName );
+            }
+            else
+            {
+                content << wxString::Format( wxS( "  - Junction at (%.2f, %.2f) mm\n" ), x_mm, y_mm );
+            }
         }
         content << wxS( "\n" );
     }
@@ -215,8 +316,24 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
             double y1_mm = schIUScale.IUTomm( start.y );
             double x2_mm = schIUScale.IUTomm( end.x );
             double y2_mm = schIUScale.IUTomm( end.y );
-            content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm\n" ),
-                                        x1_mm, y1_mm, x2_mm, y2_mm );
+            
+            // Get net name if available
+            wxString netName = wxS( "" );
+            if( SCH_CONNECTION* conn = wire->Connection( &sheet ) )
+            {
+                netName = conn->Name();
+            }
+            
+            if( !netName.IsEmpty() )
+            {
+                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm on net: %s\n" ),
+                                            x1_mm, y1_mm, x2_mm, y2_mm, netName );
+            }
+            else
+            {
+                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm\n" ),
+                                            x1_mm, y1_mm, x2_mm, y2_mm );
+            }
         }
         content << wxS( "\n" );
     }
@@ -231,8 +348,24 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
             double x_mm = schIUScale.IUTomm( pos.x );
             double y_mm = schIUScale.IUTomm( pos.y );
             wxString labelText = label->GetText();
-            content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm\n" ),
-                                        labelText, x_mm, y_mm );
+            
+            // Get net name if available
+            wxString netName = wxS( "" );
+            if( SCH_CONNECTION* conn = label->Connection( &sheet ) )
+            {
+                netName = conn->Name();
+            }
+            
+            if( !netName.IsEmpty() && netName != labelText )
+            {
+                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ),
+                                            labelText, x_mm, y_mm, netName );
+            }
+            else
+            {
+                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm\n" ),
+                                            labelText, x_mm, y_mm );
+            }
         }
         content << wxS( "\n" );
     }
@@ -253,7 +386,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         content << wxS( "\n" );
     }
 
-    if( junctions.empty() && wires.empty() && labels.empty() && texts.empty() )
+    if( symbols.empty() && junctions.empty() && wires.empty() && labels.empty() && texts.empty() )
     {
         content << wxS( "  (Schematic is empty)\n" );
     }
@@ -265,17 +398,33 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
 wxString SCH_OLLAMA_AGENT_TOOL::BuildPrompt( const wxString& aUserRequest )
 {
     wxString prompt;
-    prompt << wxS( "USER REQUEST:\n" ) << aUserRequest << wxS( "\n\n" );
     
-    // Add current schematic content
+    // Make the user request VERY prominent and clear
+    prompt << wxS( "═══════════════════════════════════════════════════════════════════════════════\n" )
+           << wxS( "USER REQUEST - THIS IS WHAT YOU MUST DO:\n" )
+           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n\n" )
+           << aUserRequest
+           << wxS( "\n\n" )
+           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n" )
+           << wxS( "END OF USER REQUEST\n" )
+           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n\n" );
+    
+    // Add current schematic content for context
     wxString schematicContent = GetCurrentSchematicContent();
     if( !schematicContent.IsEmpty() )
     {
-        prompt << schematicContent << wxS( "\n" );
+        prompt << wxS( "CURRENT SCHEMATIC STATE (for reference):\n" )
+               << wxS( "───────────────────────────────────────────────────────────────────────────\n" )
+               << schematicContent
+               << wxS( "\n" )
+               << wxS( "───────────────────────────────────────────────────────────────────────────\n\n" );
     }
     
-    prompt << wxS( "Remember to respond with TASKS, a blank line, then COMMANDS. " )
-           << wxS( "Emit TOOL <name> <json> lines if a tool invocation is required before COMMANDS.\n" );
+    // Add reminder to focus on the user request
+    prompt << wxS( "IMPORTANT: Your response must directly address the USER REQUEST above. " )
+           << wxS( "Use the available tools and commands to fulfill the user's request. " )
+           << wxS( "If the request is unclear, make reasonable assumptions based on schematic design best practices.\n\n" );
+    
     return prompt;
 }
 
@@ -286,6 +435,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
     m_agent->BeginBatch();
 
     wxStringTokenizer tokenizer( aResponse, wxS( "\n" ) );
+    std::set<std::string> unknownToolsLogged;
     
     while( tokenizer.HasMoreTokens() )
     {
@@ -315,8 +465,36 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
             if( toolName.IsEmpty() )
                 continue;
 
-            if( ExecuteToolCommand( toolName, payload ) )
+            wxString lowerTool = toolName;
+            lowerTool.MakeLower();
+
+            bool supportedTool =
+                    lowerTool == wxS( "schematic.place_component" )
+                    || lowerTool == wxS( "schematic.move_component" )
+                    || lowerTool == wxS( "mock.selection_inspector" );
+
+            if( !supportedTool )
+            {
+                std::string normalizedTool = lowerTool.ToStdString();
+
+                if( unknownToolsLogged.insert( normalizedTool ).second )
+                {
+                    wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ),
+                                  toolName.wx_str() );
+                }
+
+                continue;
+            }
+
+            if( m_toolCallHandler )
+            {
+                m_toolCallHandler->HandleToolCall( toolName, payload );
                 success = true;
+            }
+            else if( ExecuteToolCommand( toolName, payload ) )
+            {
+                success = true;
+            }
 
             continue;
         }
@@ -418,170 +596,13 @@ void SCH_OLLAMA_AGENT_TOOL::initializeSystemPrompt()
             wxS( "schematic.place_component" ),
             _( "Places a schematic symbol from the library at the given coordinates (millimeters)." ),
             wxS( "TOOL schematic.place_component {\"symbol\":\"Device:R\",\"x\":100,\"y\":50,\"reference\":\"R1\"}" ) } );
+    
+    m_toolCatalog.emplace_back( TOOL_DESCRIPTOR{
+            wxS( "schematic.move_component" ),
+            _( "Moves a component to a new position on the schematic." ),
+            wxS( "TOOL schematic.move_component {\"reference\":\"R1\",\"x\":150.0,\"y\":75.0}" ) } );
 
-    wxString prompt;
-    prompt << wxS( "You are an expert schematic design assistant specializing in electronic circuit design " )
-           << wxS( "and KiCad schematic capture. You understand electrical engineering principles, " )
-           << wxS( "circuit topology, signal flow, power distribution, and schematic design best practices.\n\n" )
-           << wxS( "Your role is to help designers create clear, well-organized schematics by:\n" )
-           << wxS( "- Understanding circuit requirements and translating them into schematic elements\n" )
-           << wxS( "- Placing components, junctions, and connections logically\n" )
-           << wxS( "- Adding appropriate labels for nets, power rails, and signals\n" )
-           << wxS( "- Organizing schematics for readability and maintainability\n" )
-           << wxS( "- Following schematic design conventions (power at top, ground at bottom, signal flow left-to-right)\n" )
-           << wxS( "- Ensuring proper net connectivity and avoiding common design errors\n\n" )
-           << wxS( "=== RESPONSE FORMAT ===\n" )
-           << wxS( "Always respond using this exact structure:\n\n" )
-           << wxS( "TASKS:\n" )
-           << wxS( "- Explain your design approach and what you're creating in the schematic\n" )
-           << wxS( "- Describe the circuit topology, signal flow, and component placement strategy\n" )
-           << wxS( "- Note any design considerations or best practices you're applying\n\n" )
-           << wxS( "COMMANDS:\n" )
-           << wxS( "- One command per line using the supported syntax (JUNCTION, WIRE, LABEL, TEXT)\n" )
-           << wxS( "- Use clear, descriptive labels that follow naming conventions (e.g., VCC, GND, CLK, DATA)\n" )
-           << wxS( "- Place elements with appropriate spacing for readability\n" )
-           << wxS( "- Never mix prose inside COMMANDS.\n" )
-           << wxS( "- All coordinates must be in millimeters (mm)\n\n" );
-
-    if( !m_toolCatalog.empty() )
-    {
-        prompt << wxS( "=== TOOL CALLING ===\n" )
-               << wxS( "You have access to tools that can perform actions on the schematic. " )
-               << wxS( "Use tools when you need to place components or perform operations that require tool execution.\n\n" )
-               << wxS( "TOOL CALL SYNTAX:\n" )
-               << wxS( "When you need to call a tool, emit a single line with this exact format:\n" )
-               << wxS( "TOOL <tool_name> <json_object>\n\n" )
-               << wxS( "CRITICAL RULES FOR TOOL CALLS:\n" )
-               << wxS( "1. The line MUST start with the word 'TOOL' (all caps) followed by a space\n" )
-               << wxS( "2. Next comes the tool name (exactly as listed below) followed by a space\n" )
-               << wxS( "3. Then a valid JSON object with no line breaks (all on one line)\n" )
-               << wxS( "4. The JSON object must be properly formatted with double quotes for keys and string values\n" )
-               << wxS( "5. Do NOT include any text before or after the TOOL line\n" )
-               << wxS( "6. Tool calls should appear BEFORE the COMMANDS section if needed\n\n" )
-               << wxS( "EXAMPLE OF CORRECT TOOL CALL:\n" )
-               << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:R\",\"x\":100.0,\"y\":50.0,\"reference\":\"R1\"}\n\n" )
-               << wxS( "EXAMPLE OF INCORRECT TOOL CALL (DO NOT DO THIS):\n" )
-               << wxS( "I will place a resistor: TOOL schematic.place_component {...}  <-- WRONG: extra text\n" )
-               << wxS( "TOOL schematic.place_component {symbol:'R', x:100}  <-- WRONG: single quotes, missing quotes\n" )
-               << wxS( "TOOL schematic.place_component\n" )
-               << wxS( "{\"symbol\":\"R\"}  <-- WRONG: JSON split across lines\n\n" )
-               << wxS( "=== AVAILABLE TOOLS ===\n\n" );
-
-        for( const TOOL_DESCRIPTOR& tool : m_toolCatalog )
-        {
-            if( tool.name == wxS( "schematic.place_component" ) )
-            {
-                prompt << wxS( "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" )
-                       << wxS( "TOOL: schematic.place_component\n" )
-                       << wxS( "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" )
-                       << wxS( "DESCRIPTION:\n" )
-                       << wxS( "Places a schematic symbol (component) from the KiCad symbol library onto the schematic\n" )
-                       << wxS( "at the specified coordinates. This tool is used to add components like resistors,\n" )
-                       << wxS( "capacitors, ICs, connectors, and power symbols to the schematic.\n\n" )
-                       << wxS( "WHEN TO USE:\n" )
-                       << wxS( "- When you need to place any component (resistor, capacitor, IC, connector, etc.)\n" )
-                       << wxS( "- When placing power symbols (VCC, GND, +5V, etc.)\n" )
-                       << wxS( "- When you need to add a component that exists in the KiCad symbol libraries\n\n" )
-                       << wxS( "SYNTAX:\n" )
-                       << wxS( "TOOL schematic.place_component <json_object>\n\n" )
-                       << wxS( "JSON PARAMETERS:\n" )
-                       << wxS( "{\n" )
-                       << wxS( "  \"symbol\": string (REQUIRED)\n" )
-                       << wxS( "    - Library symbol identifier in format \"LibraryName:SymbolName\"\n" )
-                       << wxS( "    - Examples: \"Device:R\", \"Device:C\", \"power:+5V\", \"power:GND\"\n" )
-                       << wxS( "    - Common libraries: Device, power, Connector, Regulator_Linear\n" )
-                       << wxS( "    - Must be a valid symbol from the KiCad symbol libraries\n\n" )
-                       << wxS( "  \"x\": number (REQUIRED)\n" )
-                       << wxS( "    - X coordinate in millimeters where to place the component\n" )
-                       << wxS( "    - Example: 100.0, 50.5, 0.0\n\n" )
-                       << wxS( "  \"y\": number (REQUIRED)\n" )
-                       << wxS( "    - Y coordinate in millimeters where to place the component\n" )
-                       << wxS( "    - Example: 100.0, 50.5, 0.0\n\n" )
-                       << wxS( "  \"reference\": string (OPTIONAL)\n" )
-                       << wxS( "    - Reference designator for the component (e.g., \"R1\", \"C1\", \"U1\", \"J1\")\n" )
-                       << wxS( "    - If not provided, KiCad will auto-assign based on component type\n" )
-                       << wxS( "    - Examples: \"R1\", \"C2\", \"U3\", \"J1\", \"D1\"\n\n" )
-                       << wxS( "  \"unit\": number (OPTIONAL, default: 1)\n" )
-                       << wxS( "    - Unit number for multi-unit parts (e.g., multi-gate ICs)\n" )
-                       << wxS( "    - Only needed for components with multiple units per package\n" )
-                       << wxS( "    - Example: 1, 2, 3, 4\n\n" )
-                       << wxS( "  \"rotation\": number (OPTIONAL, default: 0)\n" )
-                       << wxS( "    - Rotation angle in degrees\n" )
-                       << wxS( "    - Valid values: 0, 90, 180, 270\n" )
-                       << wxS( "    - 0 = normal orientation, 90 = rotated clockwise, etc.\n\n" )
-                       << wxS( "}\n\n" )
-                       << wxS( "COMMON SYMBOL LIBRARIES AND EXAMPLES:\n" )
-                       << wxS( "- Device library: \"Device:R\" (resistor), \"Device:C\" (capacitor), \"Device:L\" (inductor),\n" )
-                       << wxS( "                  \"Device:D\" (diode), \"Device:Q\" (transistor)\n" )
-                       << wxS( "- Power library: \"power:+5V\", \"power:+3V3\", \"power:GND\", \"power:VCC\"\n" )
-                       << wxS( "- Connector library: \"Connector:Conn_01x02_Male\", \"Connector:USB_C_Receptacle\"\n" )
-                       << wxS( "- Regulator_Linear: \"Regulator_Linear:LM1117-3.3\", \"Regulator_Linear:LM7805\"\n\n" )
-                       << wxS( "EXAMPLES:\n\n" )
-                       << wxS( "Example 1: Place a resistor at (100mm, 50mm):\n" )
-                       << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:R\",\"x\":100.0,\"y\":50.0}\n\n" )
-                       << wxS( "Example 2: Place a capacitor with reference C1 at (150mm, 75mm):\n" )
-                       << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:C\",\"x\":150.0,\"y\":75.0,\"reference\":\"C1\"}\n\n" )
-                       << wxS( "Example 3: Place a +5V power symbol at (0mm, 0mm):\n" )
-                       << wxS( "TOOL schematic.place_component {\"symbol\":\"power:+5V\",\"x\":0.0,\"y\":0.0}\n\n" )
-                       << wxS( "Example 4: Place a GND symbol rotated 180 degrees:\n" )
-                       << wxS( "TOOL schematic.place_component {\"symbol\":\"power:GND\",\"x\":50.0,\"y\":100.0,\"rotation\":180}\n\n" )
-                       << wxS( "Example 5: Place unit 2 of a multi-unit IC:\n" )
-                       << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:74HC00\",\"x\":200.0,\"y\":100.0,\"unit\":2}\n\n" )
-                       << wxS( "ERROR HANDLING:\n" )
-                       << wxS( "- If the symbol library or symbol name is invalid, the tool will fail\n" )
-                       << wxS( "- Always use the exact library:symbol format (case-sensitive)\n" )
-                       << wxS( "- Coordinates must be numbers (integers or floats), not strings\n" )
-                       << wxS( "- Rotation must be one of: 0, 90, 180, 270\n\n" )
-                       << wxS( "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" );
-            }
-            else
-            {
-                // Generic tool documentation for any other tools
-                prompt << wxS( "Tool: " ) << tool.name << wxS( "\n" )
-                       << wxS( "Description: " ) << tool.description << wxS( "\n" )
-                       << wxS( "Example: " ) << tool.usage << wxS( "\n\n" );
-            }
-        }
-
-        prompt << wxS( "=== TOOL USAGE WORKFLOW ===\n" )
-               << wxS( "When you need to use a tool, follow this workflow:\n\n" )
-               << wxS( "1. DECIDE: Determine if you need a tool or can use COMMANDS directly\n" )
-               << wxS( "   - Use tools for: placing components (schematic.place_component)\n" )
-               << wxS( "   - Use COMMANDS for: wires, junctions, labels, text annotations\n\n" )
-               << wxS( "2. CALL TOOL: If you need a tool, emit the TOOL line BEFORE the TASKS section\n" )
-               << wxS( "   - Format: TOOL <tool_name> <json_object>\n" )
-               << wxS( "   - Must be valid JSON on a single line\n" )
-               << wxS( "   - You can call multiple tools, each on its own line\n\n" )
-               << wxS( "3. EXPLAIN: Continue with TASKS section explaining what you're doing\n" )
-               << wxS( "   - Describe the component you just placed\n" )
-               << wxS( "   - Explain the design rationale\n\n" )
-               << wxS( "4. ADD CONNECTIONS: Provide COMMANDS for wires, labels, and other elements\n" )
-               << wxS( "   - Connect the placed component with wires\n" )
-               << wxS( "   - Add net labels as needed\n" )
-               << wxS( "   - Add junctions where wires connect\n\n" )
-               << wxS( "EXAMPLE COMPLETE WORKFLOW:\n" )
-               << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:R\",\"x\":100.0,\"y\":50.0,\"reference\":\"R1\"}\n" )
-               << wxS( "TOOL schematic.place_component {\"symbol\":\"Device:C\",\"x\":150.0,\"y\":50.0,\"reference\":\"C1\"}\n\n" )
-               << wxS( "TASKS:\n" )
-               << wxS( "Placing a resistor-capacitor (RC) circuit. R1 is a 10kΩ resistor at (100mm, 50mm) and\n" )
-               << wxS( "C1 is a 100nF capacitor at (150mm, 50mm). These will form a low-pass filter.\n\n" )
-               << wxS( "COMMANDS:\n" )
-               << wxS( "WIRE 100.0 50.0 150.0 50.0\n" )
-               << wxS( "LABEL 125.0 45.0 \"SIGNAL_IN\"\n\n" );
-    }
-
-    prompt << wxS( "=== DESIGN GUIDELINES ===\n" )
-           << wxS( "- Use standard schematic conventions: power rails at top, ground at bottom\n" )
-           << wxS( "- Maintain consistent spacing (typically 2.54mm/0.1\" grid spacing)\n" )
-           << wxS( "- Use descriptive net labels that indicate signal purpose (e.g., SPI_CLK, I2C_SDA)\n" )
-           << wxS( "- Place junctions clearly at connection points\n" )
-           << wxS( "- Organize related components and signals together\n" )
-           << wxS( "- Consider signal flow direction when placing elements\n" )
-           << wxS( "- Always use millimeters for all coordinates\n\n" )
-           << wxS( "Remember: Tool calls must be valid JSON on a single line starting with 'TOOL'. " )
-           << wxS( "Double-check your JSON syntax before emitting tool calls.\n" );
-
-    m_systemPrompt = prompt;
+    m_systemPrompt = GenerateOllamaAgentSystemPrompt( m_toolCatalog );
 }
 
 
@@ -604,6 +625,21 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         catch( const json::exception& e )
         {
             wxLogWarning( wxS( "[OllamaAgent] place_component payload parse error: %s" ),
+                          wxString::FromUTF8( e.what() ) );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.move_component" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleMoveComponentTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            wxLogWarning( wxS( "[OllamaAgent] move_component payload parse error: %s" ),
                           wxString::FromUTF8( e.what() ) );
             return false;
         }
@@ -712,8 +748,96 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 }
 
 
+bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    auto getString = [&]( const char* aKey ) -> std::optional<wxString>
+    {
+        if( aPayload.contains( aKey ) && aPayload[aKey].is_string() )
+            return wxString::FromUTF8( aPayload[aKey].get<std::string>() );
+
+        return std::nullopt;
+    };
+
+    std::optional<wxString> referenceOpt = getString( "reference" );
+
+    if( !referenceOpt || referenceOpt->IsEmpty() )
+    {
+        DisplayError( m_frame, _( "move_component tool requires a \"reference\" field." ) );
+        return false;
+    }
+
+    wxString reference = *referenceOpt;
+    reference.Trim( true ).Trim( false );
+
+    // Find the symbol by reference
+    SCH_SYMBOL* symbol = nullptr;
+    SCH_SHEET_PATH symbolSheet;
+    SCH_SHEET_LIST hierarchy = m_frame->Schematic().Hierarchy();
+
+    for( SCH_SHEET_PATH& sheet : hierarchy )
+    {
+        SCH_SCREEN* screen = sheet.LastScreen();
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
+            wxString candidateRef = candidate->GetRef( &sheet, false );
+
+            if( candidateRef.CmpNoCase( reference ) == 0 )
+            {
+                symbol = candidate;
+                symbolSheet = sheet;
+                break;
+            }
+        }
+
+        if( symbol )
+            break;
+    }
+
+    if( !symbol )
+    {
+        DisplayError( m_frame,
+                      wxString::Format( _( "Component with reference \"%s\" not found." ), reference ) );
+        return false;
+    }
+
+    // Get new position
+    double xMm = aPayload.value( "x", 0.0 );
+    double yMm = aPayload.value( "y", 0.0 );
+
+    VECTOR2I newPos( schIUScale.mmToIU( xMm ), schIUScale.mmToIU( yMm ) );
+    VECTOR2I currentPos = symbol->GetPosition();
+    VECTOR2I delta = newPos - currentPos;
+
+    // Move the symbol
+    SCH_SCREEN* screen = symbolSheet.LastScreen();
+    if( !screen )
+        return false;
+
+    SCH_COMMIT commit( m_frame );
+    commit.Modify( symbol, screen );
+    symbol->Move( delta );
+
+    commit.Push( wxString::Format( _( "Move component %s" ), reference ) );
+
+    return true;
+}
+
+
 void SCH_OLLAMA_AGENT_TOOL::setTransitions()
 {
     Go( &SCH_OLLAMA_AGENT_TOOL::ProcessRequest, SCH_ACTIONS::ollamaAgentRequest.MakeEvent() );
     Go( &SCH_OLLAMA_AGENT_TOOL::ShowAgentDialog, SCH_ACTIONS::ollamaAgentDialog.MakeEvent() );
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::RunToolCommand( const wxString& aToolName, const wxString& aPayload )
+{
+    return ExecuteToolCommand( aToolName, aPayload );
 }

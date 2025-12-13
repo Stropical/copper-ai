@@ -139,9 +139,9 @@ const wxAuiPaneInfo& defaultOllamaAgentPaneInfo( wxWindow* aWindow )
             .TopDockable( false )
             .BottomDockable( false )
             .CloseButton( true )
-            .MinSize( aWindow->FromDIP( wxSize( 300, 200 ) ) )
-            .BestSize( aWindow->FromDIP( wxSize( 350, 400 ) ) )
-            .FloatingSize( aWindow->FromDIP( wxSize( 400, 500 ) ) )
+            .MinSize( aWindow->FromDIP( wxSize( 360, 200 ) ) )
+            .BestSize( aWindow->FromDIP( wxSize( 460, 400 ) ) )
+            .FloatingSize( aWindow->FromDIP( wxSize( 520, 500 ) ) )
             .FloatingPosition( aWindow->FromDIP( wxPoint( 50, 50 ) ) )
             .Show( false );
 

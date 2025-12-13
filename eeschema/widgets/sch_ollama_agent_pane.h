@@ -26,6 +26,10 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <deque>
+#include <wx/timer.h>
+
+#include <tools/sch_ollama_agent_tool.h>
 
 class wxStyledTextCtrl;
 class wxButton;
@@ -35,14 +39,21 @@ class wxBoxSizer;
 class wxWindow;
 class wxStaticText;
 class SCH_EDIT_FRAME;
-class SCH_OLLAMA_AGENT_TOOL;
+class TOOL_CALL_BUBBLE;
+
+enum class CHAT_BUBBLE_KIND
+{
+    USER,
+    AGENT,
+    THINKING
+};
 
 /**
  * Chat-style panel for interacting with Ollama agent.
  * Similar to Cursor's chat interface with message history.
  * This panel is dockable in the schematic editor alongside hierarchy and properties panels.
  */
-class SCH_OLLAMA_AGENT_PANE : public WX_PANEL
+class SCH_OLLAMA_AGENT_PANE : public WX_PANEL, public SCH_OLLAMA_TOOL_CALL_HANDLER
 {
 public:
     SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent );
@@ -70,17 +81,30 @@ public:
     void SetTool( SCH_OLLAMA_AGENT_TOOL* aTool );
 
 private:
+    void HandleToolCall( const wxString& aToolName, const wxString& aPayload ) override;
     void onSendButton( wxCommandEvent& aEvent );
     void sendMessage();
     void scrollToBottom();
-    void addMessageToChat( const wxString& aMessage, bool aIsUser, bool aIsThinking = false );
-    void removeThinkingMessage();
+    wxWindow* addMessageToChat( const wxString& aMessage, CHAT_BUBBLE_KIND aKind );
     void CancelCurrentRequest();
     void StartConnectionCheck();
     void OnRequestCancelled( wxCommandEvent& aEvent );
     void OnConnectionCheckResult( wxCommandEvent& aEvent );
+    void OnResponseReceived( wxCommandEvent& aEvent );
+    void OnRequestFailed( wxCommandEvent& aEvent );
+    void OnResponsePartial( wxCommandEvent& aEvent );
+    void processStreamChunk( const wxString& aChunk );
+    wxString filterToolLines( const wxString& aChunk, bool aFromStreaming );
+    void queueToolCall( const wxString& aToolName, const wxString& aPayload );
+    void processNextToolCall();
+    void appendThinkingText( const wxString& aText );
+    void appendAgentResponse( const wxString& aText );
+    void finalizeThinkingBubble();
+    void clearReasoningBubble();
+    void flushStreamBubble();
+    wxString sanitizeFinalResponse( const wxString& aResponse );
+    void OnStreamUpdateTimer( wxTimerEvent& aEvent );
 
-    SCH_EDIT_FRAME* m_frame;
     SCH_OLLAMA_AGENT_TOOL* m_tool;
     wxScrolledWindow* m_chatPanel;
     wxBoxSizer* m_chatSizer;
@@ -95,10 +119,26 @@ private:
     std::thread m_connectionThread;
     std::mutex m_threadMutex;
     std::mutex m_connectionMutex;
-    wxWindow* m_thinkingBubble;      // Reference to the thinking message bubble
     wxWindow* m_streamingBubble;     // Reference to the streaming response bubble
     wxString m_streamingText;        // Accumulated streaming text
     std::atomic<bool> m_cancelRequested;
+    wxWindow* m_reasoningBubble;
+    bool m_inThinkSection;
+    bool m_hasReasoningContent;
+    wxString m_reasoningText;
+    wxString m_responseAccumulator;
+    wxTimer m_streamUpdateTimer;
+    bool m_streamBubbleDirty;
+
+    struct TOOL_CALL_REQUEST
+    {
+        wxString toolName;
+        wxString payload;
+        TOOL_CALL_BUBBLE* bubble;
+    };
+
+    std::deque<TOOL_CALL_REQUEST> m_toolCallQueue;
+    bool m_toolCallActive;
     
     // Event IDs for async communication
     enum
@@ -109,10 +149,6 @@ private:
         ID_REQUEST_CANCELLED,
         ID_CONNECTION_CHECK_RESULT
     };
-    
-    void OnResponseReceived( wxCommandEvent& aEvent );
-    void OnRequestFailed( wxCommandEvent& aEvent );
-    void OnResponsePartial( wxCommandEvent& aEvent );
 };
 
 #endif // SCH_OLLAMA_AGENT_PANE_H

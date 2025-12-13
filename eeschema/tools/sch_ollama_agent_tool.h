@@ -23,6 +23,7 @@
 #include "sch_tool_base.h"
 #include "sch_agent.h"
 #include "ollama_client.h"
+#include "sch_ollama_agent_prompt.h"
 #include <vector>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -31,6 +32,13 @@ class SCH_OLLAMA_AGENT_DIALOG;
 
 class SCH_EDIT_FRAME;
 
+class SCH_OLLAMA_TOOL_CALL_HANDLER
+{
+public:
+    virtual ~SCH_OLLAMA_TOOL_CALL_HANDLER() = default;
+    virtual void HandleToolCall( const wxString& aToolName, const wxString& aPayload ) = 0;
+};
+
 /**
  * Tool that integrates Ollama AI with schematic manipulation.
  * Uses the simple schematic agent for direct manipulation.
@@ -38,12 +46,8 @@ class SCH_EDIT_FRAME;
 class SCH_OLLAMA_AGENT_TOOL : public SCH_TOOL_BASE<SCH_EDIT_FRAME>
 {
 public:
-    struct TOOL_DESCRIPTOR
-    {
-        wxString name;
-        wxString description;
-        wxString usage;
-    };
+    // Use the shared tool descriptor structure
+    using TOOL_DESCRIPTOR = SCH_OLLAMA_TOOL_DESCRIPTOR;
 
     SCH_OLLAMA_AGENT_TOOL();
     ~SCH_OLLAMA_AGENT_TOOL() override {}
@@ -99,10 +103,22 @@ public:
      */
     const std::vector<TOOL_DESCRIPTOR>& GetToolCatalog() const { return m_toolCatalog; }
 
+    /**
+     * Register a handler that will be notified when TOOL lines are encountered.
+     * When set, TOOL execution is delegated to the handler (for async UI display).
+     */
+    void SetToolCallHandler( SCH_OLLAMA_TOOL_CALL_HANDLER* aHandler ) { m_toolCallHandler = aHandler; }
+
+    /**
+     * Execute a tool command immediately (used by asynchronous handlers).
+     */
+    bool RunToolCommand( const wxString& aToolName, const wxString& aPayload );
+
 private:
     void initializeSystemPrompt();
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
     bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
+    bool HandleMoveComponentTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
@@ -110,6 +126,7 @@ private:
     wxString m_model;  // Default model name
     wxString m_systemPrompt;
     std::vector<TOOL_DESCRIPTOR> m_toolCatalog;
+    SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
 };
 
 #endif // SCH_OLLAMA_AGENT_TOOL_H

@@ -470,6 +470,7 @@ set( EESCHEMA_SRCS
     tools/ollama_client.cpp
     tools/sch_ollama_agent_dialog.cpp
     tools/sch_ollama_agent_tool.cpp
+    tools/sch_ollama_agent_prompt.cpp
     tools/sch_point_editor.cpp
     tools/sch_selection.cpp
     tools/sch_selection_tool.cpp

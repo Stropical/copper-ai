@@ -311,7 +311,7 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
         }
         else
         {
-            AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
+            AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5001)" ) );
         }
     }
     

@@ -23,7 +23,56 @@
 #include <padstack.h>
 %}
 
+// Forward declare the enum classes to establish their namespace scope
+// This must be done before any headers that use them
+enum class UNCONNECTED_LAYER_MODE;
+enum class CUSTOM_SHAPE_ZONE_MODE;
+
+// Now fully define them
+enum class UNCONNECTED_LAYER_MODE
+{
+    KEEP_ALL,
+    START_END_ONLY,
+    REMOVE_ALL,
+    REMOVE_EXCEPT_START_AND_END
+};
+
+enum class CUSTOM_SHAPE_ZONE_MODE
+{
+    OUTLINE,
+    CONVEXHULL
+};
+
+// Ignore the original methods that cause SWIG to incorrectly qualify the enum types
+// Must be before %include
+%ignore PADSTACK::UnconnectedLayerMode;
+%ignore PADSTACK::SetUnconnectedLayerMode;
+%ignore PADSTACK::CustomShapeInZoneMode;
+%ignore PADSTACK::SetCustomShapeInZoneMode;
+%ignore PAD::GetUnconnectedLayerMode;
+%ignore PAD::SetUnconnectedLayerMode;
+%ignore PAD::GetCustomShapeInZoneOpt;
+%ignore PAD::SetCustomShapeInZoneOpt;
+
 %include padstack.h
+
+// Extend PADSTACK to provide wrapper methods that explicitly use namespace-scope enums
+%extend PADSTACK {
+    // Wrapper methods to ensure SWIG uses the correct enum types
+    UNCONNECTED_LAYER_MODE GetUnconnectedLayerMode() const {
+        return $self->UnconnectedLayerMode();
+    }
+    void SetUnconnectedLayerMode( UNCONNECTED_LAYER_MODE aMode ) {
+        $self->SetUnconnectedLayerMode( aMode );
+    }
+    CUSTOM_SHAPE_ZONE_MODE GetCustomShapeInZoneMode() const {
+        return $self->CustomShapeInZoneMode();
+    }
+    void SetCustomShapeInZoneMode( CUSTOM_SHAPE_ZONE_MODE aMode ) {
+        $self->SetCustomShapeInZoneMode( aMode );
+    }
+}
+
 %include pad.h
 
 %rename(Get) operator   PAD*;
@@ -63,6 +112,20 @@ const int PAD_DRILL_SHAPE_OBLONG = (const int)PAD_DRILL_SHAPE::OBLONG;
 
     int GetChamferPositions() { return $self->GetChamferPositions( F_Cu ); }
     void SetChamferPositions( int aPositions ) { $self->SetChamferPositions( F_Cu, aPositions ); }
+
+    // Wrapper methods for enum types to ensure SWIG uses namespace-scope enums
+    UNCONNECTED_LAYER_MODE GetUnconnectedLayerMode() const {
+        return $self->GetUnconnectedLayerMode();
+    }
+    void SetUnconnectedLayerMode( UNCONNECTED_LAYER_MODE aMode ) {
+        $self->SetUnconnectedLayerMode( aMode );
+    }
+    CUSTOM_SHAPE_ZONE_MODE GetCustomShapeInZoneOpt() const {
+        return $self->GetCustomShapeInZoneOpt();
+    }
+    void SetCustomShapeInZoneOpt( CUSTOM_SHAPE_ZONE_MODE aOption ) {
+        $self->SetCustomShapeInZoneOpt( aOption );
+    }
 
     %pythoncode
     %{

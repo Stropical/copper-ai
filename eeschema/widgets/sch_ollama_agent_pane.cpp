@@ -22,6 +22,8 @@
 #include <tools/sch_ollama_agent_tool.h>
 #include <wx/sizer.h>
 #include <wx/textctrl.h>
+#include <wx/richtext/richtextctrl.h>
+#include <wx/string.h>
 #include <wx/button.h>
 #include <wx/panel.h>
 #include <wx/scrolwin.h>
@@ -33,12 +35,16 @@
 #include <wx/dcmemory.h>
 #include <wx/dcbuffer.h>
 #include <wx/thread.h>
+#include <wx/app.h>
 #include <widgets/ui_common.h>
 #include <wx/stc/stc.h>
+#include <wx/timer.h>
 #include <scintilla_tricks.h>
 #include <algorithm>
 #include <thread>
 #include <mutex>
+#include <wx/tokenzr.h>
+#include <vector>
 
 namespace
 {
@@ -58,83 +64,294 @@ const wxColour CURSOR_THINK_BORDER( 40, 44, 56 );
 const wxColour CURSOR_ACCENT( 124, 101, 255 );
 const wxColour CURSOR_SUCCESS( 79, 224, 182 );
 const wxColour CURSOR_DANGER( 233, 97, 74 );
+constexpr int STREAM_UPDATE_INTERVAL_MS = 8;
+
+wxString NormalizeMarkdownLine( const wxString& aLine, bool& aWasHeading )
+{
+    wxString line = aLine;
+    wxString trimmed = line;
+    trimmed.Trim( true );
+
+    int headingLevel = 0;
+    size_t idx = 0;
+
+    while( idx < line.length() && line[idx] == '#' && headingLevel < 6 )
+    {
+        ++headingLevel;
+        ++idx;
+    }
+
+    if( headingLevel > 0 && idx < line.length() && line[idx] == ' ' )
+    {
+        wxString headingText = line.Mid( idx + 1 );
+        headingText.Trim( true );
+        headingText.Trim( false );
+        headingText.MakeUpper();
+        aWasHeading = true;
+        return headingText;
+    }
+
+    aWasHeading = false;
+
+    line.Replace( wxS( "`" ), wxEmptyString );
+    line.Replace( wxS( "**" ), wxEmptyString );
+    line.Replace( wxS( "*" ), wxEmptyString );
+
+    return line;
 }
+
+wxString TrimBoth( const wxString& aValue )
+{
+    wxString trimmed = aValue;
+    trimmed.Trim( true );
+    trimmed.Trim( false );
+    return trimmed;
+}
+
+static bool IsTableLine( const wxString& aLine )
+{
+    wxString trimmed = TrimBoth( aLine );
+
+    if( trimmed.IsEmpty() )
+        return false;
+
+    int pipeCount = 0;
+    for( wxChar ch : trimmed )
+    {
+        if( ch == '|' )
+            ++pipeCount;
+    }
+
+    return pipeCount >= 2;
+}
+
+static std::vector<wxString> ParseTableRow( const wxString& aLine )
+{
+    std::vector<wxString> cells;
+    wxStringTokenizer tokenizer( aLine, wxS( "|" ), wxTOKEN_RET_EMPTY_ALL );
+
+    while( tokenizer.HasMoreTokens() )
+    {
+        wxString cell = tokenizer.GetNextToken();
+        cell.Trim( true );
+        cell.Trim( false );
+        cells.push_back( cell );
+    }
+
+    while( !cells.empty() && cells.front().IsEmpty() )
+        cells.erase( cells.begin() );
+    while( !cells.empty() && cells.back().IsEmpty() )
+        cells.pop_back();
+
+    return cells;
+}
+
+static bool IsTableSeparatorRow( const std::vector<wxString>& aCells )
+{
+    if( aCells.empty() )
+        return false;
+
+    for( const wxString& cell : aCells )
+    {
+        wxString stripped = TrimBoth( cell );
+        if( stripped.IsEmpty() )
+            continue;
+
+        for( wxChar ch : stripped )
+        {
+            if( ch != '-' && ch != ':' )
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static wxString RenderTableBlock( const std::vector<std::vector<wxString>>& aRows )
+{
+    if( aRows.empty() )
+        return wxEmptyString;
+
+    std::vector<std::vector<wxString>> rows;
+    rows.reserve( aRows.size() );
+
+    bool hadSeparator = false;
+
+    for( const std::vector<wxString>& row : aRows )
+    {
+        if( IsTableSeparatorRow( row ) )
+        {
+            hadSeparator = true;
+            continue;
+        }
+
+        rows.push_back( row );
+    }
+
+    if( rows.empty() )
+        return wxEmptyString;
+
+    size_t columnCount = 0;
+    for( const auto& row : rows )
+        columnCount = std::max( columnCount, row.size() );
+
+    if( columnCount == 0 )
+        return wxEmptyString;
+
+    std::vector<size_t> colWidths( columnCount, 0 );
+
+     for( const auto& row : rows )
+     {
+         for( size_t idx = 0; idx < columnCount; ++idx )
+         {
+             wxString cell = ( idx < row.size() ) ? row[idx] : wxString( wxEmptyString );
+             colWidths[idx] = std::max( colWidths[idx], static_cast<size_t>( cell.length() ) );
+         }
+     }
+
+     auto formatRow = [&]( const std::vector<wxString>& aRow )
+     {
+         wxString line;
+         for( size_t idx = 0; idx < columnCount; ++idx )
+         {
+             wxString cell = ( idx < aRow.size() ) ? aRow[idx] : wxString( wxEmptyString );
+            wxString padded = cell;
+            size_t pad = ( idx < colWidths.size() ) ? ( colWidths[idx] - cell.length() ) : 0;
+            line << wxS( " " ) << padded;
+            line << wxString( ' ', static_cast<size_t>( pad ) + 2 );
+
+            if( idx + 1 < columnCount )
+                line << wxS( "|" );
+        }
+
+        return line.Trim( false );
+    };
+
+    wxString result;
+
+    for( size_t rowIdx = 0; rowIdx < rows.size(); ++rowIdx )
+    {
+        result << formatRow( rows[rowIdx] ) << wxS( "\n" );
+
+        if( rowIdx == 0 && hadSeparator )
+        {
+            wxString separatorLine;
+            for( size_t idx = 0; idx < columnCount; ++idx )
+            {
+                size_t width = idx < colWidths.size() ? colWidths[idx] : 0;
+                separatorLine << wxString( '-', width + 2 );
+                if( idx + 1 < columnCount )
+                    separatorLine << wxS( "+" );
+            }
+
+            result << separatorLine << wxS( "\n" );
+        }
+    }
+
+    return result;
+}
+
+static wxString FormatMarkdownTables( const wxString& aMessage )
+{
+    if( aMessage.empty() )
+        return aMessage;
+
+    wxStringTokenizer tokenizer( aMessage, wxS( "\n" ), wxTOKEN_RET_EMPTY_ALL );
+    std::vector<wxString> lines;
+
+    while( tokenizer.HasMoreTokens() )
+        lines.push_back( tokenizer.GetNextToken() );
+
+    bool endsWithNewline = !aMessage.empty() && aMessage.Last() == '\n';
+
+    wxString result;
+    std::vector<std::vector<wxString>> tableRows;
+
+    auto flushTable = [&]()
+    {
+        if( tableRows.empty() )
+            return;
+
+        result << RenderTableBlock( tableRows );
+        tableRows.clear();
+    };
+
+    for( size_t idx = 0; idx < lines.size(); ++idx )
+    {
+        wxString& line = lines[idx];
+
+        if( IsTableLine( line ) )
+        {
+            tableRows.push_back( ParseTableRow( line ) );
+            continue;
+        }
+
+        flushTable();
+        result << line;
+
+        if( idx + 1 < lines.size() || endsWithNewline )
+            result << wxS( "\n" );
+    }
+
+    flushTable();
+
+    return result;
+}
+}
+
+enum class REQUEST_FAILURE_REASON
+{
+    GENERIC = 0,
+    AGENT_UNAVAILABLE = 1
+};
 
 // Message bubble panel for chat messages with Cursor-inspired styling.
 class MESSAGE_BUBBLE : public wxPanel
 {
 public:
-    MESSAGE_BUBBLE( wxWindow* aParent, const wxString& aMessage, bool aIsUser, bool aIsThinking = false ) :
+    MESSAGE_BUBBLE( wxWindow* aParent, const wxString& aMessage, CHAT_BUBBLE_KIND aKind ) :
         wxPanel( aParent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ),
-        m_textLabel( nullptr ),
-        m_isUser( aIsUser ),
-        m_isThinking( aIsThinking ),
+        m_textCtrl( nullptr ),
+        m_kind( aKind ),
         m_cornerRadius( 12 ),
         m_padding( 12 ),
         m_maxWidth( 520 )
     {
-        if( aIsThinking )
-        {
-            m_bgColor = CURSOR_THINK_BUBBLE;
-            m_textColor = CURSOR_MUTED;
-            m_borderColor = CURSOR_THINK_BORDER;
-        }
-        else if( aIsUser )
-        {
-            m_bgColor = CURSOR_USER_BUBBLE;
-            m_textColor = *wxWHITE;
-            m_borderColor = CURSOR_USER_BORDER;
-        }
-        else
-        {
-            m_bgColor = CURSOR_AGENT_BUBBLE;
-            m_textColor = CURSOR_AGENT_TEXT;
-            m_borderColor = CURSOR_AGENT_BORDER;
-        }
+        configureAppearance();
 
         SetBackgroundColour( CURSOR_BG );
         SetBackgroundStyle( wxBG_STYLE_PAINT );
         SetDoubleBuffered( true );
 
         wxBoxSizer* mainSizer = new wxBoxSizer( wxHORIZONTAL );
-        if( !aIsUser )
-            mainSizer->Add( 0, 0, 0, wxEXPAND, 0 );
+
+        if( m_kind == CHAT_BUBBLE_KIND::USER )
+            mainSizer->AddStretchSpacer();
 
         m_contentSizer = new wxBoxSizer( wxVERTICAL );
 
-        if( aIsThinking )
-        {
-            wxStaticText* thinkingText = new wxStaticText( this, wxID_ANY, _( "Thinking..." ) );
-            thinkingText->SetForegroundColour( m_textColor );
-            wxFont font = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
-            font.SetPointSize( 11 );
-            thinkingText->SetFont( font );
-            thinkingText->Wrap( m_maxWidth - ( m_padding * 2 ) );
-            m_contentSizer->Add( thinkingText, 0, wxEXPAND | wxALL, m_padding );
-        }
-        else
-        {
-            m_textLabel = new wxStaticText( this, wxID_ANY, aMessage, wxDefaultPosition, wxDefaultSize,
-                                            wxST_NO_AUTORESIZE );
-            m_textLabel->SetBackgroundStyle( wxBG_STYLE_TRANSPARENT );
-            m_textLabel->SetForegroundColour( m_textColor );
+        wxString initialText = aMessage;
+        if( initialText.IsEmpty() && m_kind == CHAT_BUBBLE_KIND::THINKING )
+            initialText = _( "Thinking..." );
 
-            wxFont font = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
-            font.SetPointSize( 11 );
-            font.SetFamily( wxFONTFAMILY_DEFAULT );
-            m_textLabel->SetFont( font );
+        m_textCtrl = new wxRichTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                         wxDefaultSize,
+                                         wxBORDER_NONE | wxRE_MULTILINE );
+        m_textCtrl->SetBackgroundColour( m_bgColor );
+        m_textCtrl->SetEditable( false );
+        m_textCtrl->ShowScrollbars( wxSHOW_SB_NEVER, wxSHOW_SB_NEVER );
+        m_textCtrl->Bind( wxEVT_CHAR, []( wxKeyEvent& ) {} );
 
-            m_contentSizer->Add( m_textLabel, 0, wxEXPAND | wxALL, m_padding );
-            UpdateTextControl( aMessage );
-        }
+        m_contentSizer->Add( m_textCtrl, 1, wxEXPAND | wxALL, m_padding );
+        SetFormattedText( initialText );
 
         mainSizer->Add( m_contentSizer, 0,
-                        aIsUser ? ( wxALIGN_RIGHT | wxEXPAND ) : ( wxALIGN_LEFT | wxEXPAND ), 0 );
+                        m_kind == CHAT_BUBBLE_KIND::USER ? ( wxALIGN_RIGHT | wxEXPAND )
+                                                         : ( wxALIGN_LEFT | wxEXPAND ),
+                        0 );
 
-        if( aIsUser )
-            mainSizer->Add( 0, 0, 1, wxEXPAND, 0 );
-        else
-            mainSizer->Add( 0, 0, 0, wxEXPAND, 0 );
+        if( m_kind != CHAT_BUBBLE_KIND::USER )
+            mainSizer->AddStretchSpacer();
 
         SetSizer( mainSizer );
         Layout();
@@ -145,19 +362,33 @@ public:
 
     void UpdateText( const wxString& aMessage )
     {
-        if( !m_textLabel )
-            return;
-
-        m_textLabel->SetLabel( aMessage );
-        UpdateTextControl( aMessage );
-
-        if( wxWindow* parent = GetParent() )
-            parent->Layout();
-
-        Refresh();
+        SetFormattedText( aMessage );
     }
 
 private:
+    void configureAppearance()
+    {
+        switch( m_kind )
+        {
+        case CHAT_BUBBLE_KIND::USER:
+            m_bgColor = CURSOR_USER_BUBBLE;
+            m_textColor = *wxWHITE;
+            m_borderColor = CURSOR_USER_BORDER;
+            break;
+        case CHAT_BUBBLE_KIND::THINKING:
+            m_bgColor = CURSOR_THINK_BUBBLE;
+            m_textColor = CURSOR_MUTED;
+            m_borderColor = CURSOR_THINK_BORDER;
+            break;
+        case CHAT_BUBBLE_KIND::AGENT:
+        default:
+            m_bgColor = CURSOR_AGENT_BUBBLE;
+            m_textColor = CURSOR_AGENT_TEXT;
+            m_borderColor = CURSOR_AGENT_BORDER;
+            break;
+        }
+    }
+
     void OnPaint( wxPaintEvent& )
     {
         wxAutoBufferedPaintDC dc( this );
@@ -168,60 +399,308 @@ private:
         dc.DrawRoundedRectangle( 0, 0, size.GetWidth(), size.GetHeight(), m_cornerRadius );
     }
 
-    void UpdateTextControl( const wxString& aMessage )
+    void SetFormattedText( const wxString& aMessage )
     {
-        if( !m_textLabel )
+        if( !m_textCtrl )
             return;
 
+        wxFont baseFont = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
+        baseFont.SetPointSize( 11 );
+        baseFont.SetStyle( wxFONTSTYLE_NORMAL );
+        baseFont.SetWeight( wxFONTWEIGHT_NORMAL );
+        baseFont.SetFamily( wxFONTFAMILY_DEFAULT );
+
+        wxTextAttr defaultAttr( m_textColor, m_bgColor, baseFont );
+        wxColour codeBg = m_bgColor;
+        codeBg = codeBg.ChangeLightness( 110 );
+        wxTextAttr codeAttr( m_textColor, codeBg, baseFont );
+
+        bool wasEditable = m_textCtrl->IsEditable();
+        m_textCtrl->SetEditable( true );
+        m_textCtrl->Freeze();
+        m_textCtrl->SetDefaultStyle( defaultAttr );
+        m_textCtrl->SetBackgroundColour( m_bgColor );
+        m_textCtrl->Clear();
+
+        wxString normalized = FormatMarkdownTables( aMessage );
+
+        bool bold = false;
+        bool heading = false;
+        bool codeBlock = false;
+        bool startOfLine = true;
+
+        for( size_t i = 0; i < normalized.length(); )
+        {
+            if( normalized[i] == '\r' )
+            {
+                ++i;
+                continue;
+            }
+
+            if( normalized.Mid( i, 3 ) == wxS( "```" ) )
+            {
+                if( codeBlock )
+                {
+                    m_textCtrl->EndStyle();
+                    codeBlock = false;
+                    i += 3;
+                    startOfLine = true;
+                    continue;
+                }
+                else
+                {
+                    size_t closing = normalized.find( wxS( "```" ), i + 3 );
+                    if( closing == wxString::npos )
+                    {
+                        m_textCtrl->WriteText( wxS( "```" ) );
+                        i += 3;
+                        continue;
+                    }
+
+                    m_textCtrl->BeginStyle( codeAttr );
+                    codeBlock = true;
+                    i += 3;
+                    startOfLine = true;
+                    continue;
+                }
+            }
+
+            if( normalized[i] == '\n' )
+            {
+                if( heading )
+                {
+                    m_textCtrl->EndStyle();
+                    heading = false;
+                }
+
+                m_textCtrl->Newline();
+                startOfLine = true;
+                ++i;
+                continue;
+            }
+
+            if( !codeBlock && normalized.Mid( i, 2 ) == wxS( "**" ) )
+            {
+                size_t closing = normalized.find( wxS( "**" ), i + 2 );
+                if( closing == wxString::npos )
+                {
+                    m_textCtrl->WriteText( wxS( "**" ) );
+                    i += 2;
+                    continue;
+                }
+
+                if( bold )
+                    m_textCtrl->EndBold();
+                else
+                    m_textCtrl->BeginBold();
+
+                bold = !bold;
+                i += 2;
+                startOfLine = false;
+                continue;
+            }
+
+            if( !codeBlock && startOfLine )
+            {
+                if( normalized.Mid( i, 2 ) == wxS( "- " ) || normalized.Mid( i, 2 ) == wxS( "* " ) )
+                {
+                    m_textCtrl->WriteText( wxS( "• " ) );
+                    i += 2;
+                    startOfLine = false;
+                    continue;
+                }
+
+                if( normalized[i] == '#' )
+                {
+                    size_t pos = i;
+                    int level = 0;
+
+                    while( pos < normalized.length() && normalized[pos] == '#' && level < 6 )
+                    {
+                        ++level;
+                        ++pos;
+                    }
+
+                    if( pos < normalized.length() && normalized[pos] == ' ' )
+                    {
+                        i = pos + 1;
+                        wxFont headingFont( baseFont );
+                        headingFont.SetPointSize( baseFont.GetPointSize() + std::max( 0, 4 - level ) );
+                        headingFont.SetWeight( wxFONTWEIGHT_BOLD );
+                        wxTextAttr headingAttr( m_textColor, m_bgColor, headingFont );
+                        m_textCtrl->BeginStyle( headingAttr );
+                        heading = true;
+                        startOfLine = false;
+                        continue;
+                    }
+                }
+            }
+
+            wxChar ch = normalized[i];
+            wxString charStr( ch );
+            m_textCtrl->WriteText( charStr );
+
+            if( ch != ' ' && ch != '\t' )
+                startOfLine = false;
+
+            ++i;
+        }
+
+        if( heading )
+            m_textCtrl->EndStyle();
+        if( codeBlock )
+            m_textCtrl->EndStyle();
+        if( bold )
+            m_textCtrl->EndBold();
+
+        m_textCtrl->ShowPosition( m_textCtrl->GetLastPosition() );
+        m_textCtrl->Thaw();
+        m_textCtrl->SetEditable( wasEditable );
+
+        UpdateTextControl();
+
+        if( wxWindow* parent = GetParent() )
+            parent->Layout();
+
+        Refresh();
+    }
+
+    void UpdateTextControl()
+    {
+        if( !m_textCtrl )
+            return;
+
+        wxString value = m_textCtrl->GetValue();
+        wxStringTokenizer tokenizer( value, wxS( "\n" ), wxTOKEN_RET_EMPTY_ALL );
+        std::vector<wxString> lines;
+
+        while( tokenizer.HasMoreTokens() )
+            lines.push_back( tokenizer.GetNextToken() );
+
+        if( lines.empty() )
+            lines.emplace_back( wxEmptyString );
+
+        wxClientDC dc( m_textCtrl );
+        dc.SetFont( m_textCtrl->GetFont() );
+
+        int measuredWidth = 0;
+        for( const wxString& line : lines )
+        {
+            wxSize extent = dc.GetTextExtent( line );
+            measuredWidth = std::max( measuredWidth, extent.GetWidth() );
+        }
+
         wxWindow* parent = GetParent();
-        int minWidth = 240;
         int parentWidth = parent ? parent->GetClientSize().GetWidth() : m_maxWidth;
+        int availableWidth = parentWidth > 0 ? parentWidth - FromDIP( 80 ) : m_maxWidth;
+        int minWidth = FromDIP( 220 );
 
-        if( parentWidth <= 0 )
-            parentWidth = m_maxWidth;
+        if( availableWidth <= 0 )
+            availableWidth = m_maxWidth;
 
-        int availableWidth = std::max( minWidth, parentWidth - 80 );    // keep left/right padding
-        int wrapWidth = std::min( m_maxWidth, availableWidth );
+        int targetWidth = std::clamp( measuredWidth + ( m_padding * 2 ), minWidth,
+                                      std::min( m_maxWidth, availableWidth ) );
 
-        m_textLabel->Wrap( wrapWidth - ( m_padding * 2 ) );
+        int charHeight = m_textCtrl->GetCharHeight();
+        if( charHeight <= 0 )
+            charHeight = FromDIP( 18 );
 
-        wxSize bestSize = m_textLabel->GetBestSize();
-        m_textLabel->SetMinSize( wxSize( wrapWidth, bestSize.GetHeight() ) );
+        int targetHeight = charHeight * static_cast<int>( lines.size() ) + ( m_padding * 2 );
 
+        m_textCtrl->SetMinSize( wxSize( targetWidth, targetHeight ) );
+        m_textCtrl->SetMaxSize( wxSize( targetWidth, targetHeight ) );
+        m_contentSizer->Fit( this );
         m_contentSizer->Layout();
         Layout();
         Fit();
         Refresh();
     }
 
-    wxStaticText* m_textLabel;
+    wxRichTextCtrl* m_textCtrl;
     wxBoxSizer* m_contentSizer;
     wxColour m_bgColor;
     wxColour m_textColor;
     wxColour m_borderColor;
-    bool m_isUser;
-    bool m_isThinking;
+    CHAT_BUBBLE_KIND m_kind;
     int m_cornerRadius;
     int m_padding;
     int m_maxWidth;
 };
 
+class TOOL_CALL_BUBBLE : public wxPanel
+{
+public:
+    TOOL_CALL_BUBBLE( wxWindow* aParent, const wxString& aToolName, const wxString& aPayload ) :
+        wxPanel( aParent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_SIMPLE ),
+        m_statusLabel( nullptr )
+    {
+        SetBackgroundColour( CURSOR_SURFACE );
+        SetForegroundColour( CURSOR_BORDER );
+        SetDoubleBuffered( true );
+
+        wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
+
+        wxBoxSizer* headerSizer = new wxBoxSizer( wxHORIZONTAL );
+        wxStaticText* title = new wxStaticText( this, wxID_ANY,
+                                                wxString::Format( _( "Tool: %s" ), aToolName ) );
+        title->SetForegroundColour( CURSOR_PRIMARY );
+        wxFont headerFont = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
+        headerFont.SetWeight( wxFONTWEIGHT_BOLD );
+        headerSizer->Add( title, 0, wxALIGN_CENTER_VERTICAL );
+
+        m_statusLabel = new wxStaticText( this, wxID_ANY, _( "Queued" ) );
+        headerSizer->AddStretchSpacer();
+        headerSizer->Add( m_statusLabel, 0, wxALIGN_CENTER_VERTICAL );
+        mainSizer->Add( headerSizer, 0, wxEXPAND | wxALL, 8 );
+
+        wxStaticText* payloadLabel = new wxStaticText(
+                this, wxID_ANY, wxString::Format( _( "Payload: %s" ), aPayload ) );
+        payloadLabel->SetForegroundColour( CURSOR_MUTED );
+        payloadLabel->Wrap( FromDIP( 260 ) );
+        mainSizer->Add( payloadLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8 );
+
+        SetSizer( mainSizer );
+        Layout();
+    }
+
+    void UpdateStatus( const wxString& aStatus, const wxColour& aColour )
+    {
+        if( !m_statusLabel )
+            return;
+
+        m_statusLabel->SetLabel( aStatus );
+        m_statusLabel->SetForegroundColour( aColour );
+        Layout();
+    }
+
+private:
+    wxStaticText* m_statusLabel;
+};
+
 
 SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
     WX_PANEL( aParent ),
-    m_frame( aParent ),
     m_tool( nullptr ),
     m_chatPanel( nullptr ),
     m_chatSizer( nullptr ),
     m_inputCtrl( nullptr ),
+    m_scintillaTricks( nullptr ),
     m_sendButton( nullptr ),
     m_clearButton( nullptr ),
     m_cancelButton( nullptr ),
     m_statusText( nullptr ),
     m_isProcessing( false ),
+    m_streamingBubble( nullptr ),
+    m_streamingText(),
     m_cancelRequested( false ),
-    m_thinkingBubble( nullptr ),
-    m_streamingBubble( nullptr )
+    m_reasoningBubble( nullptr ),
+    m_inThinkSection( false ),
+    m_hasReasoningContent( false ),
+    m_reasoningText(),
+    m_responseAccumulator(),
+    m_streamUpdateTimer( this ),
+    m_streamBubbleDirty( false ),
+    m_toolCallActive( false )
 {
     wxASSERT( dynamic_cast<SCH_EDIT_FRAME*>( aParent ) );
 
@@ -378,6 +857,9 @@ SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
     // Register the entire pane as a hotkey suppressor so any focus within the pane
     // (including buttons, etc.) will suppress editor hotkeys.
     KIUI::RegisterHotkeySuppressor( this, true );
+
+    m_streamUpdateTimer.SetOwner( this );
+    Bind( wxEVT_TIMER, &SCH_OLLAMA_AGENT_PANE::OnStreamUpdateTimer, this, m_streamUpdateTimer.GetId() );
 }
 
 
@@ -411,7 +893,7 @@ void SCH_OLLAMA_AGENT_PANE::AddUserMessage( const wxString& aMessage )
     if( aMessage.IsEmpty() )
         return;
     
-    addMessageToChat( aMessage, true );
+    addMessageToChat( aMessage, CHAT_BUBBLE_KIND::USER );
 }
 
 
@@ -420,63 +902,55 @@ void SCH_OLLAMA_AGENT_PANE::AddAgentMessage( const wxString& aMessage )
     if( aMessage.IsEmpty() )
         return;
     
-    addMessageToChat( aMessage, false );
+    addMessageToChat( aMessage, CHAT_BUBBLE_KIND::AGENT );
 }
 
 
-void SCH_OLLAMA_AGENT_PANE::addMessageToChat( const wxString& aMessage, bool aIsUser, bool aIsThinking )
+wxWindow* SCH_OLLAMA_AGENT_PANE::addMessageToChat( const wxString& aMessage, CHAT_BUBBLE_KIND aKind )
 {
-    MESSAGE_BUBBLE* bubble = new MESSAGE_BUBBLE( m_chatPanel, aMessage, aIsUser, aIsThinking );
-    
-    // Store reference if it's a thinking message
-    if( aIsThinking )
-    {
-        m_thinkingBubble = bubble;
-    }
-    
-    // Store reference if it's a streaming message (not thinking, not user)
-    if( !aIsUser && !aIsThinking )
-    {
+    MESSAGE_BUBBLE* bubble = new MESSAGE_BUBBLE( m_chatPanel, aMessage, aKind );
+
+    if( aKind == CHAT_BUBBLE_KIND::THINKING )
+        m_reasoningBubble = bubble;
+    else if( aKind == CHAT_BUBBLE_KIND::AGENT )
         m_streamingBubble = bubble;
-    }
-    
-    // Create horizontal wrapper to properly align the bubble
+
     wxBoxSizer* rowSizer = new wxBoxSizer( wxHORIZONTAL );
-    if( aIsUser )
-        rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );  // Push to right
-    
-    // Allow bubble to expand vertically but constrain width
+
+    if( aKind == CHAT_BUBBLE_KIND::USER )
+        rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );
+
     rowSizer->Add( bubble, 0, wxALIGN_TOP | wxALL, 10 );
-    
-    if( !aIsUser )
-        rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );  // Empty space on right
-    
-    // Add row to chat sizer - allow it to expand horizontally but not vertically (bubble handles its own height)
+
+    if( aKind != CHAT_BUBBLE_KIND::USER )
+        rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );
+
     m_chatSizer->Add( rowSizer, 0, wxEXPAND | wxTOP | wxBOTTOM, 5 );
-    
-    // Force layout update to recalculate sizes
     m_chatSizer->Layout();
     m_chatPanel->SetVirtualSize( m_chatSizer->GetMinSize() );
     m_chatPanel->Layout();
     scrollToBottom();
-    
-    // Refresh to show new message
     m_chatPanel->Refresh();
+
+    return bubble;
 }
 
 
-void SCH_OLLAMA_AGENT_PANE::removeThinkingMessage()
+void SCH_OLLAMA_AGENT_PANE::clearReasoningBubble()
 {
-    if( m_thinkingBubble )
+    if( m_reasoningBubble )
     {
-        m_chatSizer->Detach( m_thinkingBubble );
-        m_thinkingBubble->Destroy();
-        m_thinkingBubble = nullptr;
-        
+        m_chatSizer->Detach( m_reasoningBubble );
+        m_reasoningBubble->Destroy();
+        m_reasoningBubble = nullptr;
         m_chatSizer->Layout();
         m_chatPanel->Layout();
         m_chatPanel->Refresh();
     }
+
+    m_reasoningText.clear();
+    m_hasReasoningContent = false;
+    m_inThinkSection = false;
 }
 
 
@@ -485,7 +959,12 @@ void SCH_OLLAMA_AGENT_PANE::ClearChat()
     m_chatSizer->Clear( true );
     m_streamingBubble = nullptr;
     m_streamingText.clear();
-    m_thinkingBubble = nullptr;
+    clearReasoningBubble();
+    m_responseAccumulator.clear();
+    m_toolCallQueue.clear();
+    m_toolCallActive = false;
+    m_streamUpdateTimer.Stop();
+    m_streamBubbleDirty = false;
     AddAgentMessage( _( "History cleared. Tell me what you want to build next." ) );
 }
 
@@ -493,7 +972,15 @@ void SCH_OLLAMA_AGENT_PANE::ClearChat()
 void SCH_OLLAMA_AGENT_PANE::SetTool( SCH_OLLAMA_AGENT_TOOL* aTool )
 {
     m_tool = aTool;
+    if( m_tool )
+        m_tool->SetToolCallHandler( this );
     StartConnectionCheck();
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::HandleToolCall( const wxString& aToolName, const wxString& aPayload )
+{
+    queueToolCall( aToolName, aPayload );
 }
 
 
@@ -513,14 +1000,73 @@ void SCH_OLLAMA_AGENT_PANE::CancelCurrentRequest()
         m_statusText->SetForegroundColour( CURSOR_DANGER );
     }
 
-    removeThinkingMessage();
+    clearReasoningBubble();
     if( m_streamingBubble )
-    {
-        m_chatSizer->Detach( m_streamingBubble );
-        m_streamingBubble->Destroy();
         m_streamingBubble = nullptr;
-    }
     m_streamingText.clear();
+    m_responseAccumulator.clear();
+    m_toolCallQueue.clear();
+    m_toolCallActive = false;
+    m_streamUpdateTimer.Stop();
+    m_streamBubbleDirty = false;
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::queueToolCall( const wxString& aToolName, const wxString& aPayload )
+{
+    if( !m_tool )
+        return;
+
+    TOOL_CALL_BUBBLE* bubble = new TOOL_CALL_BUBBLE( m_chatPanel, aToolName, aPayload );
+    wxBoxSizer* rowSizer = new wxBoxSizer( wxHORIZONTAL );
+    rowSizer->Add( bubble, 1, wxEXPAND | wxALL, 10 );
+    m_chatSizer->Add( rowSizer, 0, wxEXPAND );
+    m_chatSizer->Layout();
+    m_chatPanel->SetVirtualSize( m_chatSizer->GetMinSize() );
+    m_chatPanel->Layout();
+    scrollToBottom();
+
+    m_toolCallQueue.push_back( TOOL_CALL_REQUEST{ aToolName, aPayload, bubble } );
+    processNextToolCall();
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::processNextToolCall()
+{
+    if( m_toolCallActive || m_toolCallQueue.empty() )
+        return;
+
+    m_toolCallActive = true;
+    TOOL_CALL_REQUEST request = m_toolCallQueue.front();
+    m_toolCallQueue.pop_front();
+
+    if( request.bubble && !request.bubble->IsBeingDeleted() )
+        request.bubble->UpdateStatus( _( "Running..." ), CURSOR_ACCENT );
+
+    if( !wxTheApp )
+    {
+        bool success = m_tool ? m_tool->RunToolCommand( request.toolName, request.payload ) : false;
+        if( request.bubble && !request.bubble->IsBeingDeleted() )
+            request.bubble->UpdateStatus( success ? _( "Completed" ) : _( "Failed" ),
+                                          success ? CURSOR_SUCCESS : CURSOR_DANGER );
+        m_toolCallActive = false;
+        processNextToolCall();
+        return;
+    }
+
+    wxTheApp->CallAfter( [this, request]()
+    {
+        bool success = m_tool ? m_tool->RunToolCommand( request.toolName, request.payload ) : false;
+
+        if( request.bubble && !request.bubble->IsBeingDeleted() )
+        {
+            request.bubble->UpdateStatus( success ? _( "Completed" ) : _( "Failed" ),
+                                          success ? CURSOR_SUCCESS : CURSOR_DANGER );
+        }
+
+        m_toolCallActive = false;
+        processNextToolCall();
+    } );
 }
 
 
@@ -560,18 +1106,236 @@ void SCH_OLLAMA_AGENT_PANE::StartConnectionCheck()
 }
 
 
+wxString SCH_OLLAMA_AGENT_PANE::filterToolLines( const wxString& aChunk, bool /*aFromStreaming*/ )
+{
+    if( aChunk.IsEmpty() )
+        return wxEmptyString;
+
+    wxString filtered;
+    wxStringTokenizer tokenizer( aChunk, wxS( "\n" ), wxTOKEN_RET_EMPTY_ALL );
+    bool firstLine = true;
+
+    while( tokenizer.HasMoreTokens() )
+    {
+        wxString line = tokenizer.GetNextToken();
+        wxString trimmed = line;
+        trimmed.Trim( true ).Trim( false );
+
+        if( trimmed.StartsWith( wxS( "TOOL " ) ) )
+        {
+            wxString remainder = trimmed.Mid( 5 );
+            remainder.Trim( true ).Trim( false );
+            wxString toolName = remainder.BeforeFirst( ' ' ).Trim();
+            wxString payload;
+
+            if( remainder.Contains( wxS( " " ) ) )
+                payload = remainder.AfterFirst( ' ' ).Trim( true ).Trim( false );
+
+            queueToolCall( toolName, payload );
+            continue;
+        }
+
+        if( !firstLine )
+            filtered << wxS( "\n" );
+        filtered << line;
+        firstLine = false;
+    }
+
+    return filtered;
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::appendThinkingText( const wxString& aText )
+{
+    if( aText.IsEmpty() )
+        return;
+
+    if( !m_reasoningBubble )
+        m_reasoningBubble = addMessageToChat( wxEmptyString, CHAT_BUBBLE_KIND::THINKING );
+
+    m_hasReasoningContent = true;
+    m_reasoningText += aText;
+
+    if( MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_reasoningBubble ) )
+    {
+        wxString displayText = m_reasoningText;
+        displayText.Trim( false );
+        bubble->UpdateText( displayText );
+        m_chatSizer->Layout();
+        m_chatPanel->Layout();
+    }
+
+    scrollToBottom();
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::appendAgentResponse( const wxString& aText )
+{
+    if( aText.IsEmpty() )
+        return;
+
+    m_streamingText += aText;
+    m_streamBubbleDirty = true;
+
+    if( !m_streamingBubble )
+        m_streamingBubble = addMessageToChat( wxEmptyString, CHAT_BUBBLE_KIND::AGENT );
+
+    const size_t IMMEDIATE_THRESHOLD = 256;
+
+    if( aText.Length() > IMMEDIATE_THRESHOLD || aText.Find( '\n' ) != wxNOT_FOUND )
+    {
+        flushStreamBubble();
+    }
+    else if( !m_streamUpdateTimer.IsRunning() )
+    {
+        m_streamUpdateTimer.StartOnce( STREAM_UPDATE_INTERVAL_MS );
+    }
+
+    m_responseAccumulator += aText;
+    scrollToBottom();
+    m_chatPanel->Refresh();
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::processStreamChunk( const wxString& aChunk )
+{
+    wxString chunk = filterToolLines( aChunk, true );
+
+    if( chunk.IsEmpty() )
+        return;
+
+    const wxString THINK_START = wxS( "<think>" );
+    const wxString THINK_END = wxS( "</think>" );
+    wxString remaining = chunk;
+
+    while( !remaining.IsEmpty() )
+    {
+        if( m_inThinkSection )
+        {
+            int endIndex = remaining.Find( THINK_END );
+            if( endIndex == wxNOT_FOUND )
+            {
+                appendThinkingText( remaining );
+                remaining.clear();
+            }
+            else
+            {
+                appendThinkingText( remaining.Left( endIndex ) );
+                remaining = remaining.Mid( endIndex + THINK_END.length() );
+                m_inThinkSection = false;
+            }
+        }
+        else
+        {
+            int startIndex = remaining.Find( THINK_START );
+            if( startIndex == wxNOT_FOUND )
+            {
+                appendAgentResponse( remaining );
+                remaining.clear();
+            }
+            else
+            {
+                if( startIndex > 0 )
+                    appendAgentResponse( remaining.Left( startIndex ) );
+
+                remaining = remaining.Mid( startIndex + THINK_START.length() );
+                m_inThinkSection = true;
+
+                if( !m_reasoningBubble )
+                    m_reasoningBubble = addMessageToChat( wxEmptyString, CHAT_BUBBLE_KIND::THINKING );
+            }
+        }
+    }
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::finalizeThinkingBubble()
+{
+    if( !m_reasoningBubble )
+        return;
+
+    if( !m_hasReasoningContent )
+    {
+        clearReasoningBubble();
+        return;
+    }
+
+    if( MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_reasoningBubble ) )
+    {
+        wxString text = m_reasoningText;
+        text.Trim( true ).Trim( false );
+        bubble->UpdateText( text );
+    }
+
+    m_reasoningBubble = nullptr;
+    m_inThinkSection = false;
+}
+
+void SCH_OLLAMA_AGENT_PANE::flushStreamBubble()
+{
+    if( !m_streamBubbleDirty )
+        return;
+
+    m_streamBubbleDirty = false;
+
+    if( MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_streamingBubble ) )
+    {
+        bubble->UpdateText( m_streamingText );
+        m_chatSizer->Layout();
+        m_chatPanel->Layout();
+    }
+}
+
+
+void SCH_OLLAMA_AGENT_PANE::OnStreamUpdateTimer( wxTimerEvent& aEvent )
+{
+    (void) aEvent;
+
+    flushStreamBubble();
+}
+
+
+wxString SCH_OLLAMA_AGENT_PANE::sanitizeFinalResponse( const wxString& aResponse )
+{
+    wxString withoutTools = filterToolLines( aResponse, false );
+    const wxString THINK_START = wxS( "<think>" );
+    const wxString THINK_END = wxS( "</think>" );
+    wxString cleaned;
+    wxString remaining = withoutTools;
+
+    while( !remaining.IsEmpty() )
+    {
+        int start = remaining.Find( THINK_START );
+        if( start == wxNOT_FOUND )
+        {
+            cleaned += remaining;
+            break;
+        }
+
+        cleaned += remaining.Left( start );
+        remaining = remaining.Mid( start + THINK_START.length() );
+        int end = remaining.Find( THINK_END );
+
+        if( end == wxNOT_FOUND )
+            break;
+
+        remaining = remaining.Mid( end + THINK_END.length() );
+    }
+
+    return cleaned;
+}
+
+
 void SCH_OLLAMA_AGENT_PANE::OnRequestCancelled( wxCommandEvent& aEvent )
 {
     (void)aEvent;
-    removeThinkingMessage();
+    clearReasoningBubble();
 
     if( m_streamingBubble )
-    {
-        m_chatSizer->Detach( m_streamingBubble );
-        m_streamingBubble->Destroy();
         m_streamingBubble = nullptr;
-    }
     m_streamingText.clear();
+    m_streamUpdateTimer.Stop();
+    m_streamBubbleDirty = false;
 
     m_isProcessing = false;
     if( m_sendButton )
@@ -583,6 +1347,9 @@ void SCH_OLLAMA_AGENT_PANE::OnRequestCancelled( wxCommandEvent& aEvent )
         m_cancelButton->Enable( false );
 
     m_cancelRequested.store( false );
+
+    m_toolCallQueue.clear();
+    m_toolCallActive = false;
 
     AddAgentMessage( _( "Request cancelled. Ready when you are." ) );
     scrollToBottom();
@@ -632,6 +1399,10 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
     AddUserMessage( message );
     m_streamingBubble = nullptr;
     m_streamingText.clear();
+    m_responseAccumulator.clear();
+    clearReasoningBubble();
+    m_toolCallQueue.clear();
+    m_toolCallActive = false;
     
     // Clear input
     m_inputCtrl->ClearAll();
@@ -653,24 +1424,10 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
     }
 
     // Show thinking indicator
-    addMessageToChat( wxEmptyString, false, true );
-    
-    // Check availability first
-    OLLAMA_CLIENT* client = m_tool->GetOllama();
-    if( !client || !client->IsAvailable() )
-    {
-        removeThinkingMessage();
-        AddAgentMessage( _( "Error: Python agent not available. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
-        m_isProcessing = false;
-        if( m_sendButton )
-        {
-            m_sendButton->Enable( true );
-            m_sendButton->SetLabel( _( "Send" ) );
-        }
-        if( m_cancelButton )
-            m_cancelButton->Enable( false );
-        return;
-    }
+    m_reasoningText.clear();
+    m_hasReasoningContent = false;
+    m_inThinkSection = false;
+    m_reasoningBubble = addMessageToChat( wxEmptyString, CHAT_BUBBLE_KIND::THINKING );
     
     // Build prompt on main thread
     wxString prompt = m_tool->BuildPrompt( message );
@@ -684,24 +1441,40 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
         {
                 wxString response;
                 bool success = false;
-                
-                if( m_tool && m_tool->GetOllama() )
+                wxString errorMessage;
+                REQUEST_FAILURE_REASON failureReason = REQUEST_FAILURE_REASON::GENERIC;
+                OLLAMA_CLIENT* client = ( m_tool ? m_tool->GetOllama() : nullptr );
+
+                if( m_tool && client )
                 {
-                    auto chunkCallback = [this]( const wxString& chunk )
+                    if( !client->IsAvailable() )
                     {
-                        if( chunk.IsEmpty() || m_cancelRequested.load() )
-                            return;
+                        errorMessage = _( "Error: Python agent not available. Make sure the agent is running (default: http://127.0.0.1:5001)" );
+                        failureReason = REQUEST_FAILURE_REASON::AGENT_UNAVAILABLE;
+                    }
+                    else
+                    {
+                        auto chunkCallback = [this]( const wxString& chunk )
+                        {
+                            if( chunk.IsEmpty() || m_cancelRequested.load() )
+                                return;
 
-                        wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_RESPONSE_PARTIAL );
-                        event->SetString( chunk );
-                        wxQueueEvent( this, event );
-                    };
+                            wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_RESPONSE_PARTIAL );
+                            event->SetString( chunk );
+                            wxQueueEvent( this, event );
+                        };
 
-                    success = m_tool->GetOllama()->StreamChatCompletion( model, prompt, chunkCallback,
-                                                                          response, &m_cancelRequested,
-                                                                          systemPrompt );
+                        success = client->StreamChatCompletion( model, prompt, chunkCallback,
+                                                                response, &m_cancelRequested,
+                                                                systemPrompt );
+                    }
                 }
-                
+                else
+                {
+                    errorMessage = _( "Error: Python agent not available. Make sure the agent is running (default: http://127.0.0.1:5001)" );
+                    failureReason = REQUEST_FAILURE_REASON::AGENT_UNAVAILABLE;
+                }
+
                 if( m_cancelRequested.load() )
                 {
                     wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_REQUEST_CANCELLED );
@@ -709,7 +1482,14 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
                     return;
                 }
 
-                if( success )
+                if( !errorMessage.IsEmpty() )
+                {
+                    wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_REQUEST_FAILED );
+                    event->SetString( errorMessage );
+                    event->SetInt( static_cast<int>( failureReason ) );
+                    wxQueueEvent( this, event );
+                }
+                else if( success )
                 {
                     wxString responseCopy = response;
                     wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_RESPONSE_RECEIVED );
@@ -719,6 +1499,7 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
                 else
                 {
                     wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_REQUEST_FAILED );
+                    event->SetInt( static_cast<int>( REQUEST_FAILURE_REASON::GENERIC ) );
                     wxQueueEvent( this, event );
                 }
             } );
@@ -730,13 +1511,12 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
 
 void SCH_OLLAMA_AGENT_PANE::OnResponseReceived( wxCommandEvent& aEvent )
 {
-    wxString response = aEvent.GetString();
+    wxString response = sanitizeFinalResponse( aEvent.GetString() );
     
     if( m_cancelRequested.load() )
         return;
 
-    // Remove thinking indicator
-    removeThinkingMessage();
+    finalizeThinkingBubble();
     
     // Re-enable send button
     m_isProcessing = false;
@@ -753,13 +1533,15 @@ void SCH_OLLAMA_AGENT_PANE::OnResponseReceived( wxCommandEvent& aEvent )
     }
     
     // Ensure the full response is displayed in the chat
-    // If we were streaming, update the bubble with the complete response
+    m_streamUpdateTimer.Stop();
+    flushStreamBubble();
+    m_streamBubbleDirty = false;
+
     if( m_streamingBubble )
     {
         MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_streamingBubble );
         if( bubble )
         {
-            // Update with the complete response (includes TASKS, COMMANDS, etc.)
             bubble->UpdateText( response );
             m_chatSizer->Layout();
             m_chatPanel->Layout();
@@ -767,9 +1549,10 @@ void SCH_OLLAMA_AGENT_PANE::OnResponseReceived( wxCommandEvent& aEvent )
     }
     else
     {
-        // If no streaming bubble exists, create one with the full response
-        addMessageToChat( response, false );
+        addMessageToChat( response, CHAT_BUBBLE_KIND::AGENT );
     }
+
+    m_responseAccumulator = response;
     
     // Parse and execute commands from the response
     if( m_tool )
@@ -793,36 +1576,7 @@ void SCH_OLLAMA_AGENT_PANE::OnResponsePartial( wxCommandEvent& aEvent )
     if( m_cancelRequested.load() )
         return;
 
-    // Remove thinking bubble on first chunk
-    if( m_thinkingBubble )
-    {
-        removeThinkingMessage();
-    }
-
-    // Accumulate streaming text
-    m_streamingText += chunk;
-
-    // Create streaming bubble on first chunk
-    if( !m_streamingBubble )
-    {
-        addMessageToChat( m_streamingText, false );
-    }
-    else
-    {
-        // Update the existing streaming bubble
-        MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_streamingBubble );
-        if( bubble )
-        {
-            bubble->UpdateText( m_streamingText );
-            // Update virtual size for scrolling
-            m_chatSizer->Layout();
-            m_chatPanel->SetVirtualSize( m_chatSizer->GetMinSize() );
-            m_chatPanel->Layout();
-        }
-    }
-
-    scrollToBottom();
-    m_chatPanel->Refresh();
+    processStreamChunk( chunk );
 }
 
 
@@ -831,14 +1585,26 @@ void SCH_OLLAMA_AGENT_PANE::OnRequestFailed( wxCommandEvent& aEvent )
     if( m_cancelRequested.load() )
         return;
 
+    wxString errorMessage = aEvent.GetString();
+    if( errorMessage.IsEmpty() )
+    {
+        errorMessage = _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5001)" );
+    }
+
+    REQUEST_FAILURE_REASON reason =
+            static_cast<REQUEST_FAILURE_REASON>( aEvent.GetInt() );
+
+    if( reason != REQUEST_FAILURE_REASON::AGENT_UNAVAILABLE )
+        reason = REQUEST_FAILURE_REASON::GENERIC;
+
     // Remove thinking indicator
-    removeThinkingMessage();
+    clearReasoningBubble();
     
     if( m_streamingBubble )
-    {
         m_streamingBubble = nullptr;
-        m_streamingText.clear();
-    }
+    m_streamingText.clear();
+    m_streamUpdateTimer.Stop();
+    m_streamBubbleDirty = false;
 
     // Re-enable send button
     m_isProcessing = false;
@@ -852,11 +1618,20 @@ void SCH_OLLAMA_AGENT_PANE::OnRequestFailed( wxCommandEvent& aEvent )
     m_cancelRequested.store( false );
     if( m_statusText )
     {
-        m_statusText->SetLabel( _( "Unable to reach Ollama" ) );
+        wxString statusText;
+
+        if( reason == REQUEST_FAILURE_REASON::AGENT_UNAVAILABLE )
+            statusText = _( "Unable to reach Python agent" );
+        else
+            statusText = _( "Agent request failed" );
+
+        m_statusText->SetLabel( statusText );
         m_statusText->SetForegroundColour( CURSOR_DANGER );
     }
     
-    AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
+    AddAgentMessage( errorMessage );
+    m_toolCallQueue.clear();
+    m_toolCallActive = false;
     
     scrollToBottom();
 }
