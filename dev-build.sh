@@ -11,6 +11,7 @@
 #   ./dev-build.sh run          # Just run (skip build)
 #   ./dev-build.sh clean        # Clean build directory
 #   ./dev-build.sh configure    # Reconfigure CMake
+#   ./dev-build.sh --debug      # Run with full debug logging (curl + Python agent)
 #   ./dev-build.sh -j8          # Build with 8 parallel jobs (default is auto-detected)
 #
 # Based on official KiCad macOS build documentation:
@@ -63,6 +64,7 @@ MAKE_ARGS=""
 CLEAN=false
 CONFIGURE=false
 FORCE_BUILD=false
+DEBUG_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -83,13 +85,17 @@ while [[ $# -gt 0 ]]; do
             CONFIGURE=true
             shift
             ;;
+        --debug|-d)
+            DEBUG_MODE=true
+            shift
+            ;;
         -j*)
             MAKE_ARGS="$1"
             shift
             ;;
         *)
             error "Unknown option: $1"
-            echo "Usage: $0 [build|run|clean|configure] [-jN]"
+            echo "Usage: $0 [build|run|clean|configure] [--debug|-d] [-jN]"
             exit 1
             ;;
     esac
@@ -325,9 +331,32 @@ if [ "$ACTION" = "run" ] || [ "$ACTION" = "build_and_run" ]; then
         info "Using kicad-mac-builder Python framework"
     fi
     
+    # Enable debug logging based on DEBUG_MODE flag
+    if [ "$DEBUG_MODE" = true ]; then
+        # Enable debug logging for curl (KiCad's HTTP client)
+        export KICAD_CURL_VERBOSE=1
+        info "Curl verbose logging enabled (KICAD_CURL_VERBOSE=1)"
+        
+        # Enable debug logging for Python agent if it's running
+        # This will be picked up by the agent when it starts
+        export LOG_LEVEL=DEBUG
+        info "Debug logging enabled (LOG_LEVEL=DEBUG)"
+    else
+        # Default: only enable curl verbose (less verbose than full debug)
+        export KICAD_CURL_VERBOSE=1
+        info "Curl verbose logging enabled (KICAD_CURL_VERBOSE=1)"
+        info "Use --debug flag for full debug logging"
+    fi
+    
     success "Launching KiCad from build directory..."
     info "  Binary: ${KICAD_BIN}"
     info "  KICAD_RUN_FROM_BUILD_DIR=1"
+    if [ "$DEBUG_MODE" = true ]; then
+        info "  KICAD_CURL_VERBOSE=1 (curl debug output to stderr)"
+        info "  LOG_LEVEL=DEBUG (for Python agent)"
+    else
+        info "  KICAD_CURL_VERBOSE=1 (curl debug output to stderr)"
+    fi
     echo ""
     
     # Launch KiCad with any remaining arguments

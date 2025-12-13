@@ -1,0 +1,12 @@
+[project]
+name = "agent"
+version = "0.1.0"
+description = "Python agent that wraps Ollama API for KiCad schematic agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "requests>=2.31.0",
+    "urllib3>=2.0.0",
+]

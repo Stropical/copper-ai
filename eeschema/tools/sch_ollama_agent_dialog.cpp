@@ -159,7 +159,7 @@ SCH_OLLAMA_AGENT_DIALOG::SCH_OLLAMA_AGENT_DIALOG( wxWindow* aParent, SCH_OLLAMA_
     wxBoxSizer* statusSizer = new wxBoxSizer( wxHORIZONTAL );
     
     wxStaticText* statusText = new wxStaticText( statusPanel, wxID_ANY, 
-                                                _( "Connected to Ollama" ) );
+                                                _( "Connected to Python agent" ) );
     statusText->SetForegroundColour( wxColour( 100, 100, 100 ) );
     statusSizer->Add( statusText, 0, wxALL, 5 );
     statusSizer->AddStretchSpacer();
@@ -311,7 +311,7 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
         }
         else
         {
-            AddAgentMessage( _( "Error: Failed to communicate with Ollama server. Make sure Ollama is running on localhost:11434" ) );
+            AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
         }
     }
     

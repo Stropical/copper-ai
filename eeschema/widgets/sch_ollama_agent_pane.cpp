@@ -66,11 +66,12 @@ class MESSAGE_BUBBLE : public wxPanel
 public:
     MESSAGE_BUBBLE( wxWindow* aParent, const wxString& aMessage, bool aIsUser, bool aIsThinking = false ) :
         wxPanel( aParent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ),
-        m_textCtrl( nullptr ),
+        m_textLabel( nullptr ),
         m_isUser( aIsUser ),
         m_isThinking( aIsThinking ),
         m_cornerRadius( 12 ),
-        m_padding( 12 )
+        m_padding( 12 ),
+        m_maxWidth( 520 )
     {
         if( aIsThinking )
         {
@@ -108,26 +109,27 @@ public:
             wxFont font = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
             font.SetPointSize( 11 );
             thinkingText->SetFont( font );
-            m_contentSizer->Add( thinkingText, 0, wxALL, m_padding );
+            thinkingText->Wrap( m_maxWidth - ( m_padding * 2 ) );
+            m_contentSizer->Add( thinkingText, 0, wxEXPAND | wxALL, m_padding );
         }
         else
         {
-            m_textCtrl = new wxTextCtrl( this, wxID_ANY, aMessage,
-                                         wxDefaultPosition, wxDefaultSize,
-                                         wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP | wxTE_NO_VSCROLL | wxBORDER_NONE );
-            m_textCtrl->SetBackgroundStyle( wxBG_STYLE_TRANSPARENT );
-            m_textCtrl->SetForegroundColour( m_textColor );
+            m_textLabel = new wxStaticText( this, wxID_ANY, aMessage, wxDefaultPosition, wxDefaultSize,
+                                            wxST_NO_AUTORESIZE );
+            m_textLabel->SetBackgroundStyle( wxBG_STYLE_TRANSPARENT );
+            m_textLabel->SetForegroundColour( m_textColor );
 
             wxFont font = wxSystemSettings::GetFont( wxSYS_DEFAULT_GUI_FONT );
             font.SetPointSize( 11 );
             font.SetFamily( wxFONTFAMILY_DEFAULT );
-            m_textCtrl->SetFont( font );
+            m_textLabel->SetFont( font );
 
-            m_contentSizer->Add( m_textCtrl, 0, wxALL, m_padding );
+            m_contentSizer->Add( m_textLabel, 0, wxEXPAND | wxALL, m_padding );
             UpdateTextControl( aMessage );
         }
 
-        mainSizer->Add( m_contentSizer, 0, aIsUser ? wxALIGN_RIGHT : wxALIGN_LEFT, 0 );
+        mainSizer->Add( m_contentSizer, 0,
+                        aIsUser ? ( wxALIGN_RIGHT | wxEXPAND ) : ( wxALIGN_LEFT | wxEXPAND ), 0 );
 
         if( aIsUser )
             mainSizer->Add( 0, 0, 1, wxEXPAND, 0 );
@@ -143,11 +145,15 @@ public:
 
     void UpdateText( const wxString& aMessage )
     {
-        if( !m_textCtrl )
+        if( !m_textLabel )
             return;
 
-        m_textCtrl->SetValue( aMessage );
+        m_textLabel->SetLabel( aMessage );
         UpdateTextControl( aMessage );
+
+        if( wxWindow* parent = GetParent() )
+            parent->Layout();
+
         Refresh();
     }
 
@@ -164,25 +170,31 @@ private:
 
     void UpdateTextControl( const wxString& aMessage )
     {
-        if( !m_textCtrl )
+        if( !m_textLabel )
             return;
 
-        wxClientDC dc( this );
-        dc.SetFont( m_textCtrl->GetFont() );
-        wxSize textSize = dc.GetMultiLineTextExtent( aMessage );
-
-        int maxWidth = 520;
+        wxWindow* parent = GetParent();
         int minWidth = 240;
-        int textWidth = std::min( std::max( textSize.GetWidth() + ( m_padding * 3 / 2 ), minWidth ), maxWidth );
+        int parentWidth = parent ? parent->GetClientSize().GetWidth() : m_maxWidth;
 
-        m_textCtrl->SetMinSize( wxSize( textWidth, -1 ) );
+        if( parentWidth <= 0 )
+            parentWidth = m_maxWidth;
+
+        int availableWidth = std::max( minWidth, parentWidth - 80 );    // keep left/right padding
+        int wrapWidth = std::min( m_maxWidth, availableWidth );
+
+        m_textLabel->Wrap( wrapWidth - ( m_padding * 2 ) );
+
+        wxSize bestSize = m_textLabel->GetBestSize();
+        m_textLabel->SetMinSize( wxSize( wrapWidth, bestSize.GetHeight() ) );
+
         m_contentSizer->Layout();
         Layout();
         Fit();
         Refresh();
     }
 
-    wxTextCtrl* m_textCtrl;
+    wxStaticText* m_textLabel;
     wxBoxSizer* m_contentSizer;
     wxColour m_bgColor;
     wxColour m_textColor;
@@ -191,6 +203,7 @@ private:
     bool m_isThinking;
     int m_cornerRadius;
     int m_padding;
+    int m_maxWidth;
 };
 
 
@@ -229,7 +242,7 @@ SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
     titleText->SetForegroundColour( CURSOR_PRIMARY );
     headerSizer->Add( titleText, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 16 );
 
-    m_statusText = new wxStaticText( headerPanel, wxID_ANY, _( "Checking Ollama..." ) );
+    m_statusText = new wxStaticText( headerPanel, wxID_ANY, _( "Checking Python agent..." ) );
     m_statusText->SetForegroundColour( CURSOR_MUTED );
     headerSizer->Add( m_statusText, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 12 );
 
@@ -246,6 +259,7 @@ SCH_OLLAMA_AGENT_PANE::SCH_OLLAMA_AGENT_PANE( SCH_EDIT_FRAME* aParent ) :
                                        wxVSCROLL | wxBORDER_NONE );
     m_chatPanel->SetBackgroundColour( CURSOR_BG );
     m_chatPanel->SetScrollRate( 0, 15 );
+    m_chatPanel->EnableScrolling( false, true );
 
     m_chatSizer = new wxBoxSizer( wxVERTICAL );
     m_chatPanel->SetSizer( m_chatSizer );
@@ -431,14 +445,18 @@ void SCH_OLLAMA_AGENT_PANE::addMessageToChat( const wxString& aMessage, bool aIs
     if( aIsUser )
         rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );  // Push to right
     
+    // Allow bubble to expand vertically but constrain width
     rowSizer->Add( bubble, 0, wxALIGN_TOP | wxALL, 10 );
     
     if( !aIsUser )
         rowSizer->Add( 0, 0, 1, wxEXPAND, 0 );  // Empty space on right
     
-    m_chatSizer->Add( rowSizer, 0, wxEXPAND );
+    // Add row to chat sizer - allow it to expand horizontally but not vertically (bubble handles its own height)
+    m_chatSizer->Add( rowSizer, 0, wxEXPAND | wxTOP | wxBOTTOM, 5 );
     
+    // Force layout update to recalculate sizes
     m_chatSizer->Layout();
+    m_chatPanel->SetVirtualSize( m_chatSizer->GetMinSize() );
     m_chatPanel->Layout();
     scrollToBottom();
     
@@ -513,7 +531,7 @@ void SCH_OLLAMA_AGENT_PANE::StartConnectionCheck()
 
     if( m_statusText )
     {
-        m_statusText->SetLabel( _( "Checking Ollama connection..." ) );
+        m_statusText->SetLabel( _( "Checking Python agent connection..." ) );
         m_statusText->SetForegroundColour( CURSOR_MUTED );
     }
 
@@ -536,7 +554,7 @@ void SCH_OLLAMA_AGENT_PANE::StartConnectionCheck()
 
         wxCommandEvent* event = new wxCommandEvent( wxEVT_COMMAND_TEXT_UPDATED, ID_CONNECTION_CHECK_RESULT );
         event->SetInt( success ? 1 : 0 );
-        event->SetString( success ? _( "Connected to Ollama" ) : _( "Unable to reach Ollama" ) );
+        event->SetString( success ? _( "Connected to Python agent" ) : _( "Unable to reach Python agent" ) );
         wxQueueEvent( this, event );
     } );
 }
@@ -642,7 +660,7 @@ void SCH_OLLAMA_AGENT_PANE::sendMessage()
     if( !client || !client->IsAvailable() )
     {
         removeThinkingMessage();
-        AddAgentMessage( _( "Error: Ollama server not available. Make sure Ollama is running on 192.168.177.144:11434" ) );
+        AddAgentMessage( _( "Error: Python agent not available. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
         m_isProcessing = false;
         if( m_sendButton )
         {
@@ -730,12 +748,30 @@ void SCH_OLLAMA_AGENT_PANE::OnResponseReceived( wxCommandEvent& aEvent )
 
     if( m_statusText )
     {
-        m_statusText->SetLabel( _( "Connected to Ollama" ) );
+        m_statusText->SetLabel( _( "Connected to Python agent" ) );
         m_statusText->SetForegroundColour( CURSOR_SUCCESS );
     }
     
-    // If we were streaming, the bubble already has partial content
-    // Just finalize it by parsing commands
+    // Ensure the full response is displayed in the chat
+    // If we were streaming, update the bubble with the complete response
+    if( m_streamingBubble )
+    {
+        MESSAGE_BUBBLE* bubble = dynamic_cast<MESSAGE_BUBBLE*>( m_streamingBubble );
+        if( bubble )
+        {
+            // Update with the complete response (includes TASKS, COMMANDS, etc.)
+            bubble->UpdateText( response );
+            m_chatSizer->Layout();
+            m_chatPanel->Layout();
+        }
+    }
+    else
+    {
+        // If no streaming bubble exists, create one with the full response
+        addMessageToChat( response, false );
+    }
+    
+    // Parse and execute commands from the response
     if( m_tool )
     {
         m_tool->ParseAndExecute( response );
@@ -778,7 +814,9 @@ void SCH_OLLAMA_AGENT_PANE::OnResponsePartial( wxCommandEvent& aEvent )
         if( bubble )
         {
             bubble->UpdateText( m_streamingText );
+            // Update virtual size for scrolling
             m_chatSizer->Layout();
+            m_chatPanel->SetVirtualSize( m_chatSizer->GetMinSize() );
             m_chatPanel->Layout();
         }
     }
@@ -818,7 +856,7 @@ void SCH_OLLAMA_AGENT_PANE::OnRequestFailed( wxCommandEvent& aEvent )
         m_statusText->SetForegroundColour( CURSOR_DANGER );
     }
     
-    AddAgentMessage( _( "Error: Failed to communicate with Ollama server. Make sure Ollama is running on 192.168.177.144:11434" ) );
+    AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5000)" ) );
     
     scrollToBottom();
 }
@@ -826,7 +864,28 @@ void SCH_OLLAMA_AGENT_PANE::OnRequestFailed( wxCommandEvent& aEvent )
 
 void SCH_OLLAMA_AGENT_PANE::scrollToBottom()
 {
-    wxSize size = m_chatPanel->GetVirtualSize();
-    m_chatPanel->Scroll( 0, size.GetHeight() );
+    // Update virtual size first to ensure scrolling works correctly
+    wxSize sizerSize = m_chatSizer->GetMinSize();
+    int panelWidth = m_chatPanel->GetClientSize().GetWidth();
+    if( panelWidth <= 0 )
+        panelWidth = sizerSize.GetWidth();
+
+    m_chatPanel->SetVirtualSize( wxSize( panelWidth, sizerSize.GetHeight() ) );
+    
+    // Scroll to bottom
+    int scrollUnitY = 0;
+    m_chatPanel->GetScrollPixelsPerUnit( nullptr, &scrollUnitY );
+    if( scrollUnitY > 0 )
+    {
+        int maxY = ( sizerSize.GetHeight() + scrollUnitY - 1 ) / scrollUnitY;
+        m_chatPanel->Scroll( 0, maxY );
+    }
+    else
+    {
+        // Fallback: scroll to maximum
+        wxSize virtualSize = m_chatPanel->GetVirtualSize();
+        m_chatPanel->Scroll( 0, virtualSize.GetHeight() );
+    }
+    
     m_chatPanel->Refresh();
 }

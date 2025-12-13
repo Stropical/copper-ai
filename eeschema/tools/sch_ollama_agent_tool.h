@@ -24,6 +24,8 @@
 #include "sch_agent.h"
 #include "ollama_client.h"
 #include <vector>
+#include <optional>
+#include <nlohmann/json.hpp>
 
 class SCH_OLLAMA_AGENT_DIALOG;
 
@@ -100,6 +102,8 @@ public:
 private:
     void initializeSystemPrompt();
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
+    bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
+    wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
     std::unique_ptr<OLLAMA_CLIENT> m_ollama;

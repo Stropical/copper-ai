@@ -29,13 +29,14 @@
 class KICAD_CURL_EASY;
 
 /**
- * Simple client for communicating with Ollama API.
+ * Client for communicating with the Python agent that wraps Ollama.
  * Uses KICAD_CURL_EASY for HTTP requests.
+ * The Python agent then communicates with Ollama.
  */
 class OLLAMA_CLIENT
 {
 public:
-    OLLAMA_CLIENT( const wxString& aBaseUrl = wxS( "http://192.168.177.144:11434" ) );
+    OLLAMA_CLIENT( const wxString& aBaseUrl = wxS( "http://127.0.0.1:5000" ) );
     ~OLLAMA_CLIENT();
 
     /**

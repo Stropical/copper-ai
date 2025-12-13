@@ -46,6 +46,7 @@ namespace
         std::string buffer;
         std::string eventPayload;
         std::string lastResponse;
+        bool done = false;
     };
 
     void ProcessStreamEvent( StreamContext& aContext )
@@ -73,6 +74,40 @@ namespace
             // Ollama /api/generate streaming mode returns one JSON object per line.
             // Each object typically has a "response" field that contains the next
             // piece of text and a "done" flag when streaming is finished.
+            // Some models also return "thinking" tokens that show the model's reasoning.
+            
+            // Check for done flag first - when Ollama is finished, it sends "done": true
+            if( chunk.contains( "done" ) && chunk["done"].is_boolean() && chunk["done"].get<bool>() )
+            {
+                aContext.done = true;
+                // Final chunk may still contain a response field with the last piece of text
+                if( chunk.contains( "response" ) && chunk["response"].is_string() )
+                {
+                    std::string response = chunk["response"].get<std::string>();
+                    if( !response.empty() )
+                    {
+                        aContext.lastResponse += response;
+                        sendChunk( response );
+                    }
+                }
+                return; // Stream is complete
+            }
+            
+            // Check for thinking tokens first (some models like deepseek, qwen, etc. use this)
+            // Thinking tokens show the model's reasoning process before the actual response
+            if( chunk.contains( "thinking" ) && chunk["thinking"].is_string() )
+            {
+                std::string thinking = chunk["thinking"].get<std::string>();
+                if( !thinking.empty() )
+                {
+                    // Stream thinking tokens - these show the model's reasoning process
+                    // We include them in the response so users can see the model's thought process
+                    aContext.lastResponse += thinking;
+                    sendChunk( thinking );
+                }
+            }
+            
+            // Check for response tokens (the actual output)
             if( chunk.contains( "response" ) && chunk["response"].is_string() )
             {
                 std::string response = chunk["response"].get<std::string>();
@@ -140,6 +175,12 @@ namespace
             // Store it as the current payload and process immediately.
             context->eventPayload = trimmed;
             ProcessStreamEvent( *context );
+            
+            // If stream is done, we can stop processing more data
+            if( context->done )
+            {
+                break;
+            }
         }
 
         return realsize;
@@ -185,7 +226,7 @@ bool OLLAMA_CLIENT::ChatCompletion( const wxString& aModel, const wxString& aPro
 
     if( result != 0 )
     {
-        wxLogError( wxS( "Ollama request failed with code: %d" ), result );
+        wxLogError( wxS( "Python agent request failed with code: %d" ), result );
         return false;
     }
 
@@ -204,13 +245,13 @@ bool OLLAMA_CLIENT::ChatCompletion( const wxString& aModel, const wxString& aPro
         else if( response.contains( "error" ) )
         {
             wxString error = wxString::FromUTF8( response["error"].get<std::string>() );
-            wxLogError( wxS( "Ollama error: %s" ), error );
+            wxLogError( wxS( "Python agent error: %s" ), error );
             return false;
-        }
+    }
     }
     catch( const json::exception& e )
     {
-        wxLogError( wxS( "Failed to parse Ollama response: %s" ), wxString::FromUTF8( e.what() ) );
+        wxLogError( wxS( "Failed to parse Python agent response: %s" ), wxString::FromUTF8( e.what() ) );
         return false;
     }
 
@@ -259,16 +300,40 @@ bool OLLAMA_CLIENT::StreamChatCompletion( const wxString& aModel, const wxString
 
     if( result != 0 )
     {
-        wxLogError( wxS( "Ollama streaming request failed with code: %d" ), result );
+        wxLogError( wxS( "Python agent streaming request failed with code: %d" ), result );
         return false;
     }
 
+    // Process any remaining data in the buffer
     if( !context.eventPayload.empty() )
     {
         ProcessStreamEvent( context );
     }
+    
+    // Also process any remaining buffer data
+    if( !context.buffer.empty() )
+    {
+        std::string trimmed = TrimWhitespace( context.buffer );
+        if( !trimmed.empty() )
+        {
+            context.eventPayload = trimmed;
+            ProcessStreamEvent( context );
+        }
+    }
 
     aResponse = wxString::FromUTF8( context.lastResponse );
+    
+    if( context.done )
+    {
+        wxLogMessage( wxS( "Stream completed successfully. Total response length: %zu characters" ),
+                     context.lastResponse.length() );
+    }
+    else
+    {
+        wxLogWarning( wxS( "Stream ended without 'done' flag. Response length: %zu characters" ),
+                     context.lastResponse.length() );
+    }
+    
     return true;
 }
 
@@ -276,12 +341,39 @@ bool OLLAMA_CLIENT::StreamChatCompletion( const wxString& aModel, const wxString
 bool OLLAMA_CLIENT::IsAvailable()
 {
     if( !m_curl )
+    {
+        wxLogError( wxS( "OLLAMA_CLIENT: curl instance not available" ) );
         return false;
+    }
 
-    // Try a simple request to check if server is up
+    // Try a simple request to check if Python agent is up
+    // The agent will proxy to Ollama, so this checks both agent and Ollama availability
     wxString url = m_baseUrl + wxS( "/api/tags" );
     m_curl->SetURL( url.ToUTF8().data() );
     
+    // Set a reasonable timeout for availability check
+    curl_easy_setopt( m_curl->GetCurl(), CURLOPT_TIMEOUT, 5L );
+    curl_easy_setopt( m_curl->GetCurl(), CURLOPT_CONNECTTIMEOUT, 3L );
+    
     int result = m_curl->Perform();
-    return result == 0;
+    
+    if( result != 0 )
+    {
+        std::string errorText = m_curl->GetErrorText( result );
+        wxLogError( wxS( "OLLAMA_CLIENT: Availability check failed for %s: %s (code: %d)" ),
+                   url, wxString::FromUTF8( errorText ), result );
+        return false;
+    }
+    
+    int httpCode = m_curl->GetResponseStatusCode();
+    if( httpCode != 200 )
+    {
+        wxLogError( wxS( "OLLAMA_CLIENT: Availability check returned HTTP %d for %s" ),
+                   httpCode, url );
+        return false;
+    }
+    
+    wxLogDebug( wxS( "OLLAMA_CLIENT: Successfully connected to Python agent at %s" ), url );
+    
+    return true;
 }
