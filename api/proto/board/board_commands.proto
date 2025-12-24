@@ -178,6 +178,52 @@ message NetClassForNetsResponse
   map<string, kiapi.common.project.NetClass> classes = 1;
 }
 
+// Returns the ratsnest (unrouted connections) for the board.
+// The ratsnest shows which pads/nodes need to be connected but aren't yet connected by tracks.
+// Returns RatsnestResponse
+message GetRatsnest
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  // Optional: filter by net codes. If empty, returns ratsnest for all nets.
+  repeated kiapi.board.types.NetCode net_codes = 2;
+
+  // If true, only return visible ratsnest edges (edges where both endpoints are on visible layers).
+  // If false, return all edges regardless of layer visibility.
+  bool visible_only = 3;
+}
+
+// A single ratsnest edge representing an unrouted connection
+message RatsnestEdge
+{
+  // The net code this edge belongs to
+  kiapi.board.types.NetCode net_code = 1;
+
+  // The net name this edge belongs to
+  string net_name = 2;
+
+  // Source position of the edge (typically a pad or via)
+  kiapi.common.types.Vector2 source_position = 3;
+
+  // Target position of the edge (typically a pad or via)
+  kiapi.common.types.Vector2 target_position = 4;
+
+  // Length of the edge in nanometers
+  uint64 length_nm = 5;
+
+  // Whether this edge is visible (based on layer visibility)
+  bool visible = 6;
+}
+
+message RatsnestResponse
+{
+  // List of all unrouted connections (ratsnest edges)
+  repeated RatsnestEdge edges = 1;
+
+  // Total count of unrouted connections
+  uint32 edge_count = 2;
+}
+
 /*
  * Blocking operations
  */

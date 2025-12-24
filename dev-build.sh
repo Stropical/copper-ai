@@ -273,6 +273,10 @@ if [ "$ACTION" = "build" ] || [ "$ACTION" = "build_and_run" ] || [ "$FORCE_BUILD
     info "Building resources..."
     make ${MAKE_ARGS} bitmap_archive_build
     
+    # Build schema copy targets (ensures schemas are in build directory)
+    info "Building schema copy targets..."
+    make ${MAKE_ARGS} schema_build_copy api_schema_build_copy 2>/dev/null || true
+    
     # Build all kiface plugins (required for KiCad to run)
     info "Building kiface plugins..."
     make ${MAKE_ARGS} eeschema_kiface pcbnew_kiface gerbview_kiface cvpcb_kiface \
@@ -292,6 +296,83 @@ if [ "$ACTION" = "build" ] || [ "$ACTION" = "build_and_run" ] || [ "$FORCE_BUILD
     if [ -f "${BUILD_DIR}/resources/images.tar.gz" ] && [ ! -f "${RESOURCES_DIR}/images.tar.gz" ]; then
         info "Copying images.tar.gz to app bundle..."
         cp "${BUILD_DIR}/resources/images.tar.gz" "${RESOURCES_DIR}/"
+    fi
+    
+    # Ensure schema files are in the build directory for KICAD_RUN_FROM_BUILD_DIR
+    # On macOS, when KICAD_RUN_FROM_BUILD_DIR is set, GetStockDataPath goes up 4 dirs
+    # from executable (build/release/kicad/KiCad.app/Contents/MacOS/kicad) to get 
+    # build root (build/release), so schemas go at build/release/kicad/schemas/
+    SCHEMAS_DIR="${BUILD_DIR}/kicad/schemas"
+    mkdir -p "${SCHEMAS_DIR}"
+    
+    # Copy schemas from build directory (already copied by CMake targets) to the location
+    # where KiCad expects them when running from build directory
+    BUILD_SCHEMAS_DIR="${BUILD_DIR}/schemas"
+    if [ -d "${BUILD_SCHEMAS_DIR}" ]; then
+        info "Copying schemas from ${BUILD_SCHEMAS_DIR} to ${SCHEMAS_DIR}..."
+        cp -f "${BUILD_SCHEMAS_DIR}"/*.schema.json "${SCHEMAS_DIR}/" 2>/dev/null || true
+    else
+        # Fallback: try to copy from source tree
+        API_SCHEMA_SOURCE="${REPO_ROOT}/api/schemas/api.v1.schema.json"
+        PCM_SCHEMA_SOURCE="${REPO_ROOT}/kicad/pcm/schemas/pcm.v1.schema.json"
+        [ -f "${API_SCHEMA_SOURCE}" ] && cp -f "${API_SCHEMA_SOURCE}" "${SCHEMAS_DIR}/" 2>/dev/null || true
+        [ -f "${PCM_SCHEMA_SOURCE}" ] && cp -f "${PCM_SCHEMA_SOURCE}" "${SCHEMAS_DIR}/" 2>/dev/null || true
+    fi
+    
+    # Ensure kicad_pyshell is in the build directory for KICAD_RUN_FROM_BUILD_DIR
+    # On macOS, when KICAD_RUN_FROM_BUILD_DIR is set, GetStockDataPath goes up 4 dirs
+    # from executable (build/release/kicad/KiCad.app/Contents/MacOS/kicad) to get 
+    # build/release/kicad, then GetStockScriptingPath adds /scripting, so it expects
+    # build/release/kicad/scripting/kicad_pyshell
+    SCRIPTING_DIR="${BUILD_DIR}/kicad/scripting"
+    KICAD_PYSHELL_SOURCE="${REPO_ROOT}/scripting/kicad_pyshell"
+    KICAD_PYSHELL_DEST="${SCRIPTING_DIR}/kicad_pyshell"
+    if [ -d "${KICAD_PYSHELL_SOURCE}" ]; then
+        mkdir -p "${SCRIPTING_DIR}"
+        if [ ! -d "${KICAD_PYSHELL_DEST}" ] || [ "${KICAD_PYSHELL_SOURCE}" -nt "${KICAD_PYSHELL_DEST}" ]; then
+            info "Copying kicad_pyshell to ${KICAD_PYSHELL_DEST}..."
+            cp -R "${KICAD_PYSHELL_SOURCE}" "${KICAD_PYSHELL_DEST}"
+        fi
+    fi
+    
+    # Install CopperAI plugin to third party plugins directory
+    # KiCad searches: ~/Documents/kicad/9.99/plugins (user) and ~/Documents/kicad/9.99/3rdparty (third party/PCM)
+    # Using 3rdparty/plugins directory for third-party plugins
+    PLUGIN_SOURCE="${REPO_ROOT}/PRIVATE/com_copperai_copperagent"
+    if [ -n "${KICAD_DOCUMENTS_HOME}" ]; then
+        PLUGINS_DIR="${KICAD_DOCUMENTS_HOME}/kicad/9.99/3rdparty/plugins"
+    else
+        PLUGINS_DIR="${HOME}/Documents/kicad/9.99/3rdparty/plugins"
+    fi
+    
+    if [ -d "${PLUGIN_SOURCE}" ]; then
+        info "Installing CopperAI plugin..."
+        info "  Plugin source: ${PLUGIN_SOURCE}"
+        info "  Plugins directory: ${PLUGINS_DIR}"
+        
+        # Create plugins directory if it doesn't exist
+        mkdir -p "${PLUGINS_DIR}"
+        
+        # Remove all existing plugins
+        if [ -d "${PLUGINS_DIR}" ] && [ "$(ls -A "${PLUGINS_DIR}" 2>/dev/null)" ]; then
+            info "Removing existing plugins from ${PLUGINS_DIR}..."
+            rm -rf "${PLUGINS_DIR}"/*
+            success "Existing plugins removed"
+        fi
+        
+        # Copy CopperAI plugin
+        PLUGIN_DEST="${PLUGINS_DIR}/com_copperai_copperagent"
+        if [ -d "${PLUGIN_DEST}" ]; then
+            info "Removing existing CopperAI plugin..."
+            rm -rf "${PLUGIN_DEST}"
+        fi
+        
+        info "Copying CopperAI plugin from ${PLUGIN_SOURCE} to ${PLUGIN_DEST}..."
+        cp -R "${PLUGIN_SOURCE}" "${PLUGIN_DEST}"
+        success "CopperAI plugin installed to ${PLUGIN_DEST}"
+    else
+        warning "CopperAI plugin source not found at: ${PLUGIN_SOURCE}"
+        warning "Skipping plugin installation"
     fi
     
     if [ -f "${KICAD_BIN}" ]; then
@@ -322,14 +403,165 @@ if [ "$ACTION" = "run" ] || [ "$ACTION" = "build_and_run" ]; then
         exit 1
     fi
     
+    # Ensure schema files are present (in case we're just running, not building)
+    SCHEMAS_DIR="${BUILD_DIR}/kicad/schemas"
+    mkdir -p "${SCHEMAS_DIR}"
+    BUILD_SCHEMAS_DIR="${BUILD_DIR}/schemas"
+    if [ -d "${BUILD_SCHEMAS_DIR}" ]; then
+        cp -f "${BUILD_SCHEMAS_DIR}"/*.schema.json "${SCHEMAS_DIR}/" 2>/dev/null || true
+    fi
+    
+    # Ensure kicad_pyshell is present (in case we're just running, not building)
+    SCRIPTING_DIR="${BUILD_DIR}/kicad/scripting"
+    KICAD_PYSHELL_SOURCE="${REPO_ROOT}/scripting/kicad_pyshell"
+    KICAD_PYSHELL_DEST="${SCRIPTING_DIR}/kicad_pyshell"
+    if [ -d "${KICAD_PYSHELL_SOURCE}" ]; then
+        mkdir -p "${SCRIPTING_DIR}"
+        if [ ! -d "${KICAD_PYSHELL_DEST}" ]; then
+            cp -R "${KICAD_PYSHELL_SOURCE}" "${KICAD_PYSHELL_DEST}"
+        fi
+    fi
+    
     # Set environment variable to run from build directory
     export KICAD_RUN_FROM_BUILD_DIR=1
     
-    # Set DYLD_LIBRARY_PATH if kicad-mac-builder is being used
-    if [ -n "${KICAD_MAC_BUILDER_PYTHON_DEST}" ]; then
-        export DYLD_LIBRARY_PATH="${KICAD_MAC_BUILDER_PYTHON_DEST}:${DYLD_LIBRARY_PATH}"
-        info "Using kicad-mac-builder Python framework"
+    # Configure Python environment for KiCad scripting support
+    # When KICAD_USE_EXTERNAL_PYTHONHOME is set, KiCad won't override PYTHONPATH/PYTHONHOME
+    # This allows us to control the Python environment explicitly
+    
+    # Detect kicad-mac-builder directory if not already set
+    if [ -z "${KICAD_MAC_BUILDER_DIR}" ] && [ -n "${KICAD_MAC_BUILDER_TOOLCHAIN}" ]; then
+        KICAD_MAC_BUILDER_DIR="$(cd "$(dirname "${KICAD_MAC_BUILDER_TOOLCHAIN}")/.." && pwd)"
+    elif [ -z "${KICAD_MAC_BUILDER_DIR}" ]; then
+        # Try to auto-detect from common locations
+        POSSIBLE_PATHS=(
+            "${HOME}/Documents/GitHub/kicad-mac-builder"
+            "${REPO_ROOT}/../kicad-mac-builder"
+        )
+        for path in "${POSSIBLE_PATHS[@]}"; do
+            if [ -f "${path}/toolchain/kicad-mac-builder.cmake" ]; then
+                KICAD_MAC_BUILDER_DIR="${path}"
+                break
+            fi
+        done
     fi
+    
+    # Detect Python installation
+    PYTHON_HOME=""
+    PYTHON_MODULE_DIR=""
+    PYTHON_SCRIPTING_DIR=""
+    
+    # Check if using kicad-mac-builder Python
+    if [ -n "${KICAD_MAC_BUILDER_DIR}" ] && [ -d "${KICAD_MAC_BUILDER_DIR}/build/python-dest" ]; then
+        PYTHON_FRAMEWORK="${KICAD_MAC_BUILDER_DIR}/build/python-dest/Library/Frameworks/Python.framework/Versions/Current"
+        if [ -d "${PYTHON_FRAMEWORK}" ]; then
+            PYTHON_HOME="${PYTHON_FRAMEWORK}"
+            info "Using kicad-mac-builder Python framework: ${PYTHON_HOME}"
+        fi
+        
+        # Set DYLD_LIBRARY_PATH for kicad-mac-builder Python
+        if [ -n "${KICAD_MAC_BUILDER_PYTHON_DEST}" ]; then
+            export DYLD_LIBRARY_PATH="${KICAD_MAC_BUILDER_PYTHON_DEST}:${DYLD_LIBRARY_PATH}"
+        fi
+    else
+        # Try to detect system Python
+        if command -v python3 &> /dev/null; then
+            PYTHON_EXE=$(which python3)
+            # Get Python home (parent of bin directory)
+            PYTHON_HOME=$(python3 -c "import sys; print(sys.prefix)" 2>/dev/null || echo "")
+            if [ -n "${PYTHON_HOME}" ]; then
+                info "Using system Python: ${PYTHON_HOME}"
+            fi
+        fi
+    fi
+    
+    # Find pcbnew Python module directory
+    # On macOS, pcbnew.py and _pcbnew.so are copied to PYTHON_DEST during build
+    # But they're also in the pcbnew build directory
+    # Try multiple locations in order of preference
+    if [ -f "${BUILD_DIR}/pcbnew/pcbnew.py" ] || [ -f "${BUILD_DIR}/pcbnew/_pcbnew.so" ]; then
+        PYTHON_MODULE_DIR="$(cd "${BUILD_DIR}/pcbnew" && pwd)"
+    elif [ -f "${BUILD_DIR}/pcbnew/Release/pcbnew.py" ] || [ -f "${BUILD_DIR}/pcbnew/Release/_pcbnew.so" ]; then
+        PYTHON_MODULE_DIR="$(cd "${BUILD_DIR}/pcbnew/Release" && pwd)"
+    elif [ -f "${BUILD_DIR}/pcbnew/Debug/pcbnew.py" ] || [ -f "${BUILD_DIR}/pcbnew/Debug/_pcbnew.so" ]; then
+        PYTHON_MODULE_DIR="$(cd "${BUILD_DIR}/pcbnew/Debug" && pwd)"
+    else
+        # Try to find in app bundle Python site-packages (where PYTHON_DEST points on macOS)
+        # This is typically: build/release/kicad/KiCad.app/Contents/Frameworks/Python.framework/.../site-packages
+        APP_BUNDLE_PYTHON_DIRS=(
+            "${BUILD_DIR}/kicad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/lib/python*/site-packages"
+            "${BUILD_DIR}/kicad/KiCad.app/Contents/Frameworks/Python.framework/Versions/*/lib/python*/site-packages"
+        )
+        for pattern in "${APP_BUNDLE_PYTHON_DIRS[@]}"; do
+            for dir in ${pattern}; do
+                if [ -d "${dir}" ] && ([ -f "${dir}/pcbnew.py" ] || [ -f "${dir}/_pcbnew.so" ]); then
+                    PYTHON_MODULE_DIR="$(cd "${dir}" && pwd)"
+                    break 2
+                fi
+            done
+        done
+    fi
+    
+    # Find kicad_pyshell directory
+    if [ -d "${BUILD_DIR}/kicad/scripting/kicad_pyshell" ]; then
+        PYTHON_SCRIPTING_DIR="$(cd "${BUILD_DIR}/kicad/scripting" && pwd)"
+    elif [ -d "${REPO_ROOT}/scripting/kicad_pyshell" ]; then
+        PYTHON_SCRIPTING_DIR="$(cd "${REPO_ROOT}/scripting" && pwd)"
+    fi
+    
+    # Verify required modules exist
+    if [ -z "${PYTHON_MODULE_DIR}" ]; then
+        warning "pcbnew Python module directory not found - pcbnew.py and _pcbnew.so may be missing"
+        warning "Searched in: ${BUILD_DIR}/pcbnew, ${BUILD_DIR}/pcbnew/Release, ${BUILD_DIR}/pcbnew/Debug, and app bundle Python site-packages"
+        warning "This may cause 'ModuleNotFoundError: No module named pcbnew' errors"
+    fi
+    
+    if [ -z "${PYTHON_SCRIPTING_DIR}" ]; then
+        error "kicad_pyshell directory not found!"
+        error "Expected at: ${BUILD_DIR}/kicad/scripting/kicad_pyshell"
+        error "or: ${REPO_ROOT}/scripting/kicad_pyshell"
+        exit 1
+    fi
+    
+    # Set KICAD_USE_EXTERNAL_PYTHONHOME to prevent KiCad from overriding our PYTHONPATH
+    export KICAD_USE_EXTERNAL_PYTHONHOME=1
+    
+    # Set PYTHONHOME if we found a Python installation
+    if [ -n "${PYTHON_HOME}" ]; then
+        export PYTHONHOME="${PYTHON_HOME}"
+        info "PYTHONHOME set to: ${PYTHONHOME}"
+    else
+        warning "PYTHONHOME not set - KiCad may have trouble finding Python"
+    fi
+    
+    # Build PYTHONPATH: must include both pcbnew module directory and scripting directory
+    # Order matters: pcbnew directory first (for pcbnew module), then scripting (for kicad_pyshell)
+    NEW_PYTHONPATH=""
+    
+    # Add pcbnew module directory (contains pcbnew.py and _pcbnew.so)
+    if [ -n "${PYTHON_MODULE_DIR}" ]; then
+        NEW_PYTHONPATH="${PYTHON_MODULE_DIR}"
+    fi
+    
+    # Add scripting directory (contains kicad_pyshell module)
+    if [ -n "${PYTHON_SCRIPTING_DIR}" ]; then
+        if [ -n "${NEW_PYTHONPATH}" ]; then
+            NEW_PYTHONPATH="${NEW_PYTHONPATH}:${PYTHON_SCRIPTING_DIR}"
+        else
+            NEW_PYTHONPATH="${PYTHON_SCRIPTING_DIR}"
+        fi
+    fi
+    
+    # Prepend to existing PYTHONPATH if it exists
+    if [ -n "${PYTHONPATH}" ]; then
+        export PYTHONPATH="${NEW_PYTHONPATH}:${PYTHONPATH}"
+    else
+        export PYTHONPATH="${NEW_PYTHONPATH}"
+    fi
+    
+    info "PYTHONPATH set to: ${PYTHONPATH}"
+    info "  - pcbnew module: ${PYTHON_MODULE_DIR:-<not found>}"
+    info "  - kicad_pyshell: ${PYTHON_SCRIPTING_DIR:-<not found>}"
     
     # Enable debug logging based on DEBUG_MODE flag
     if [ "$DEBUG_MODE" = true ]; then
@@ -348,9 +580,20 @@ if [ "$ACTION" = "run" ] || [ "$ACTION" = "build_and_run" ]; then
         info "Use --debug flag for full debug logging"
     fi
     
+    # Enable API plugin tracing to debug plugin loading
+    export WXTRACE="KICAD_API"
+    info "API plugin tracing enabled (WXTRACE=KICAD_API)"
+    
     success "Launching KiCad from build directory..."
     info "  Binary: ${KICAD_BIN}"
     info "  KICAD_RUN_FROM_BUILD_DIR=1"
+    info "  KICAD_USE_EXTERNAL_PYTHONHOME=1 (using external Python environment)"
+    if [ -n "${PYTHONHOME}" ]; then
+        info "  PYTHONHOME=${PYTHONHOME}"
+    fi
+    if [ -n "${PYTHONPATH}" ]; then
+        info "  PYTHONPATH=${PYTHONPATH}"
+    fi
     if [ "$DEBUG_MODE" = true ]; then
         info "  KICAD_CURL_VERBOSE=1 (curl debug output to stderr)"
         info "  LOG_LEVEL=DEBUG (for Python agent)"

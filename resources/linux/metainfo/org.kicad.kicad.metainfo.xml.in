@@ -4,7 +4,7 @@
 <component type="desktop-application">
     <id>@KICAD_APP_NAME@</id>
 
-    <name>KiCad</name>
+    <name>CopperAI</name>
 
     <launchable type="desktop-id">@KICAD_APP_NAME@.desktop</launchable>
 
@@ -32,7 +32,7 @@
     <translation type="gettext">kicad</translation>
 
     <keywords>
-        <keyword translate="no">KiCad</keyword>
+        <keyword translate="no">CopperAI</keyword>
         <keyword>EDA</keyword>
         <keyword>PCB</keyword>
         <keyword>Schematic</keyword>

@@ -46,6 +46,9 @@
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <zone.h>
+#include <connectivity/connectivity_data.h>
+#include <connectivity/connectivity_algo.h>
+#include <ratsnest/ratsnest_data.h>
 
 #include <api/common/types/base_types.pb.h>
 #include <widgets/appearance_controls.h>
@@ -100,6 +103,7 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
     registerHandler<GetNets, NetsResponse>( &API_HANDLER_PCB::handleGetNets );
     registerHandler<GetNetClassForNets, NetClassForNetsResponse>(
             &API_HANDLER_PCB::handleGetNetClassForNets );
+    registerHandler<GetRatsnest, RatsnestResponse>( &API_HANDLER_PCB::handleGetRatsnest );
     registerHandler<RefillZones, Empty>( &API_HANDLER_PCB::handleRefillZones );
 
     registerHandler<SaveDocumentToString, SavedDocumentResponse>(
@@ -1457,6 +1461,82 @@ HANDLER_RESULT<NetClassForNetsResponse> API_HANDLER_PCB::handleGetNetClassForNet
         any.UnpackTo( &pair->second );
     }
 
+    return response;
+}
+
+
+HANDLER_RESULT<RatsnestResponse> API_HANDLER_PCB::handleGetRatsnest(
+        const HANDLER_CONTEXT<GetRatsnest>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    RatsnestResponse response;
+    BOARD* board = frame()->GetBoard();
+    std::shared_ptr<CONNECTIVITY_DATA> connectivity = board->GetConnectivity();
+
+    // Build set of net codes to filter by (if provided)
+    std::set<int> netCodeFilter;
+    const NETINFO_LIST& netInfo = board->GetNetInfo();
+
+    if( aCtx.Request.net_codes_size() > 0 )
+    {
+        for( const auto& netCode : aCtx.Request.net_codes() )
+        {
+            netCodeFilter.insert( netCode.value() );
+        }
+    }
+
+    // Iterate through all nets
+    for( NETINFO_ITEM* net : netInfo )
+    {
+        int netCode = net->GetNetCode();
+
+        // Skip if filtering by net codes and this one isn't in the filter
+        if( !netCodeFilter.empty() && !netCodeFilter.count( netCode ) )
+            continue;
+
+        // Get ratsnest for this net
+        RN_NET* rnNet = connectivity->GetRatsnestForNet( netCode );
+
+        if( !rnNet )
+            continue;
+
+        // Get edges for this net
+        const std::vector<CN_EDGE>& edges = rnNet->GetEdges();
+
+        for( const CN_EDGE& edge : edges )
+        {
+            // Skip dirty/invalid edges
+            if( !edge.GetSourceNode() || edge.GetSourceNode()->Dirty() ||
+                !edge.GetTargetNode() || edge.GetTargetNode()->Dirty() )
+                continue;
+
+            // Filter by visibility if requested
+            if( aCtx.Request.visible_only() && !edge.IsVisible() )
+                continue;
+
+            // Create edge message
+            RatsnestEdge* edgeMsg = response.add_edges();
+
+            edgeMsg->mutable_net_code()->set_value( netCode );
+            edgeMsg->set_net_name( net->GetNetname() );
+
+            // Set source and target positions
+            VECTOR2I sourcePos = edge.GetSourcePos();
+            VECTOR2I targetPos = edge.GetTargetPos();
+
+            PackVector2( *edgeMsg->mutable_source_position(), sourcePos );
+            PackVector2( *edgeMsg->mutable_target_position(), targetPos );
+
+            edgeMsg->set_length_nm( edge.GetLength() );
+            edgeMsg->set_visible( edge.IsVisible() );
+        }
+    }
+
+    response.set_edge_count( response.edges_size() );
     return response;
 }
 

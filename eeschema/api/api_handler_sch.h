@@ -23,6 +23,7 @@
 
 #include <api/api_handler_editor.h>
 #include <api/common/commands/editor_commands.pb.h>
+#include <api/schematic/schematic_commands.pb.h>
 #include <kiid.h>
 
 using namespace kiapi;
@@ -30,6 +31,8 @@ using namespace kiapi::common;
 
 class SCH_EDIT_FRAME;
 class SCH_ITEM;
+class SCH_SYMBOL;
+class SCH_SHEET_PATH;
 
 
 class API_HANDLER_SCH : public API_HANDLER_EDITOR
@@ -66,6 +69,20 @@ protected:
 private:
     HANDLER_RESULT<commands::GetOpenDocumentsResponse> handleGetOpenDocuments(
             const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::commands::GetSchematicDataResponse> handleGetSchematicData(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::GetSchematicData>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::commands::PlaceSymbolResponse> handlePlaceSymbol(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::PlaceSymbol>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::commands::PlaceWireResponse> handlePlaceWire(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::PlaceWire>& aCtx );
+
+    std::optional<SCH_ITEM*> getItemById( const KIID& aId ) const;
+
+    kiapi::schematic::types::Symbol buildSymbolMessage( const SCH_SYMBOL& aSymbol,
+            const SCH_SHEET_PATH& aPath ) const;
 
     SCH_EDIT_FRAME* m_frame;
 };

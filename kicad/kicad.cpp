@@ -237,7 +237,7 @@ bool PGM_KICAD::OnPgmInit()
 
     if( appType == KICAD_MAIN_FRAME_T )
     {
-        managerFrame = new KICAD_MANAGER_FRAME( nullptr, wxT( "KiCad" ), wxDefaultPosition,
+        managerFrame = new KICAD_MANAGER_FRAME( nullptr, wxT( "CopperAI" ), wxDefaultPosition,
                                                 wxWindow::FromDIP( wxSize( 775, -1 ), NULL ) );
         frame = managerFrame;
 

@@ -91,7 +91,8 @@ SCH_OLLAMA_AGENT_DIALOG::SCH_OLLAMA_AGENT_DIALOG( wxWindow* aParent, SCH_OLLAMA_
              wxDefaultPosition, wxSize( 600, 700 ),
              wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX ),
     m_tool( aTool ),
-    m_isProcessing( false )
+    m_isProcessing( false ),
+    m_currentBubble( nullptr )
 {
     // Main sizer
     wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
@@ -279,6 +280,9 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
 {
     wxString message = m_inputCtrl->GetValue().Trim();
     
+    // Log the captured message for debugging
+    wxLogMessage( wxS( "[OllamaAgent] Dialog captured user message: %s" ), message.wx_str() );
+    
     if( message.IsEmpty() || m_isProcessing )
         return;
     
@@ -294,23 +298,109 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
     m_sendButton->Enable( false );
     m_sendButton->SetLabel( _( "Processing..." ) );
     
-    // Process request
-    wxString response;
+    // Initialize streaming state
+    m_currentResponse.Clear();
+    m_currentBubble = nullptr;
+    
+    // Process request with streaming
+    wxString fullResponse;
     bool success = false;
     
-    if( m_tool )
+    if( m_tool && m_tool->GetOllama() )
     {
-        wxString prompt = m_tool->BuildPrompt( message );
-        success = m_tool->GetOllama()->ChatCompletion( m_tool->GetModel(), prompt, response,
-                                                       m_tool->GetSystemPrompt() );
+        // Create a streaming callback that updates the UI incrementally
+        auto chunkCallback = [this]( const wxString& chunk )
+        {
+            if( chunk.IsEmpty() )
+                return;
+            
+            // Accumulate response
+            m_currentResponse += chunk;
+            
+            // Create or update the streaming bubble
+            if( !m_currentBubble )
+            {
+                // Create a new bubble for streaming
+                m_currentBubble = new MESSAGE_BUBBLE( m_chatPanel, m_currentResponse, false );
+                m_chatSizer->Add( m_currentBubble, 0, wxALIGN_LEFT | wxALL, 5 );
+                m_chatSizer->Layout();
+                m_chatPanel->Layout();
+            }
+            else
+            {
+                // Update the bubble text by finding the text control inside
+                wxWindowList& children = m_currentBubble->GetChildren();
+                for( wxWindowList::iterator it = children.begin(); it != children.end(); ++it )
+                {
+                    wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( *it );
+                    if( textCtrl )
+                    {
+                        textCtrl->SetValue( m_currentResponse );
+                        // Force a refresh and layout update
+                        textCtrl->Refresh();
+                        m_currentBubble->Layout();
+                        break;
+                    }
+                }
+            }
+            
+            // Process events frequently to keep UI responsive during streaming
+            // This is critical to prevent freezing
+            wxYield();
+            
+            // Scroll to bottom periodically (not on every chunk to reduce overhead)
+            static int scrollCounter = 0;
+            if( (++scrollCounter % 10) == 0 )  // Scroll every 10 chunks
+            {
+                scrollToBottom();
+            }
+        };
+        
+        // Send raw user request to Python agent (which handles all prompt building)
+        success = m_tool->GetOllama()->StreamChatCompletion( 
+            m_tool->GetModel(), message, chunkCallback, fullResponse );
         
         if( success )
         {
-            AddAgentMessage( response );
-            m_tool->ParseAndExecute( response );
+            // Finalize the bubble with the complete response
+            if( m_currentBubble )
+            {
+                // Update with final response
+                wxWindowList& children = m_currentBubble->GetChildren();
+                for( wxWindowList::iterator it = children.begin(); it != children.end(); ++it )
+                {
+                    wxTextCtrl* textCtrl = dynamic_cast<wxTextCtrl*>( *it );
+                    if( textCtrl )
+                    {
+                        textCtrl->SetValue( fullResponse );
+                        textCtrl->Refresh();
+                        break;
+                    }
+                }
+                m_chatSizer->Layout();
+                m_chatPanel->Layout();
+                m_currentBubble = nullptr;
+            }
+            else
+            {
+                // No streaming happened, add as normal message
+                AddAgentMessage( fullResponse );
+            }
+            
+            m_tool->ParseAndExecute( fullResponse );
         }
         else
         {
+            // Clean up streaming bubble on error
+            if( m_currentBubble )
+            {
+                m_chatSizer->Detach( m_currentBubble );
+                m_currentBubble->Destroy();
+                m_currentBubble = nullptr;
+                m_chatSizer->Layout();
+                m_chatPanel->Layout();
+            }
+            
             AddAgentMessage( _( "Error: Failed to communicate with Python agent. Make sure the agent is running (default: http://127.0.0.1:5001)" ) );
         }
     }

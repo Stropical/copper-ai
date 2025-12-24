@@ -1591,6 +1591,9 @@ void SCH_LABEL::Serialize( google::protobuf::Any& aContainer ) const
 
     label.mutable_id()->set_value( m_Uuid.AsStdString() );
     kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any );
+    any.UnpackTo( label.mutable_text() );
 
     aContainer.PackFrom( label );
 }
@@ -1605,6 +1608,9 @@ bool SCH_LABEL::Deserialize( const google::protobuf::Any& aContainer )
 
     const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
     SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+    google::protobuf::Any any;
+    any.PackFrom( label.text() );
+    EDA_TEXT::Deserialize( any );
 
     return true;
 }
@@ -1683,14 +1689,34 @@ SCH_DIRECTIVE_LABEL::SCH_DIRECTIVE_LABEL( const SCH_DIRECTIVE_LABEL& aClassLabel
 
 void SCH_DIRECTIVE_LABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    // TODO
+    kiapi::schematic::types::DirectiveLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any );
+    any.UnpackTo( label.mutable_text() );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_DIRECTIVE_LABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    // TODO
-    return false;
+    kiapi::schematic::types::DirectiveLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    google::protobuf::Any any;
+    any.PackFrom( label.text() );
+    EDA_TEXT::Deserialize( any );
+
+    return true;
 }
 
 
@@ -1985,14 +2011,34 @@ SCH_GLOBALLABEL::SCH_GLOBALLABEL( const SCH_GLOBALLABEL& aGlobalLabel ) :
 
 void SCH_GLOBALLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    // TODO
+    kiapi::schematic::types::GlobalLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any );
+    any.UnpackTo( label.mutable_text() );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    // TODO
-    return false;
+    kiapi::schematic::types::GlobalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    google::protobuf::Any any;
+    any.PackFrom( label.text() );
+    EDA_TEXT::Deserialize( any );
+
+    return true;
 }
 
 
@@ -2202,14 +2248,34 @@ SCH_HIERLABEL::SCH_HIERLABEL( const VECTOR2I& pos, const wxString& text, KICAD_T
 
 void SCH_HIERLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    // TODO
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+
+    google::protobuf::Any any;
+    EDA_TEXT::Serialize( any );
+    any.UnpackTo( label.mutable_text() );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_HIERLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    // TODO
-    return false;
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    google::protobuf::Any any;
+    any.PackFrom( label.text() );
+    EDA_TEXT::Deserialize( any );
+
+    return true;
 }
 
 

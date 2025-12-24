@@ -19,7 +19,6 @@
 
 #include "sch_ollama_agent_tool.h"
 #include "sch_ollama_agent_dialog.h"
-#include "sch_ollama_agent_prompt.h"
 #include <sch_edit_frame.h>
 #include <dialogs/dialog_text_entry.h>
 #include <confirm.h>
@@ -48,7 +47,6 @@ SCH_OLLAMA_AGENT_TOOL::SCH_OLLAMA_AGENT_TOOL() :
     SCH_TOOL_BASE<SCH_EDIT_FRAME>( "eeschema.OllamaAgentTool" ),
     m_model( wxS( "qwen3:4b" ) )  // Default model
 {
-    initializeSystemPrompt();
 }
 
 
@@ -88,10 +86,6 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
     if( userRequest.IsEmpty() )
         return 0;
 
-    // Build prompt
-    wxString prompt = BuildPrompt( userRequest );
-    const wxString& systemPrompt = GetSystemPrompt();
-
     // Initialize ollama client lazily if needed
     if( !m_ollama )
     {
@@ -106,9 +100,9 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
         }
     }
 
-    // Send to Python agent (which forwards to Ollama)
+    // Send raw user request to Python agent (which handles all prompt building)
     wxString response;
-    if( !m_ollama->ChatCompletion( m_model, prompt, response, systemPrompt ) )
+    if( !m_ollama->ChatCompletion( m_model, userRequest, response ) )
     {
         DisplayError( m_frame, _( "Failed to communicate with Python agent server." ) );
         return 0;
@@ -395,38 +389,6 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
 }
 
 
-wxString SCH_OLLAMA_AGENT_TOOL::BuildPrompt( const wxString& aUserRequest )
-{
-    wxString prompt;
-    
-    // Make the user request VERY prominent and clear
-    prompt << wxS( "═══════════════════════════════════════════════════════════════════════════════\n" )
-           << wxS( "USER REQUEST - THIS IS WHAT YOU MUST DO:\n" )
-           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n\n" )
-           << aUserRequest
-           << wxS( "\n\n" )
-           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n" )
-           << wxS( "END OF USER REQUEST\n" )
-           << wxS( "═══════════════════════════════════════════════════════════════════════════════\n\n" );
-    
-    // Add current schematic content for context
-    wxString schematicContent = GetCurrentSchematicContent();
-    if( !schematicContent.IsEmpty() )
-    {
-        prompt << wxS( "CURRENT SCHEMATIC STATE (for reference):\n" )
-               << wxS( "───────────────────────────────────────────────────────────────────────────\n" )
-               << schematicContent
-               << wxS( "\n" )
-               << wxS( "───────────────────────────────────────────────────────────────────────────\n\n" );
-    }
-    
-    // Add reminder to focus on the user request
-    prompt << wxS( "IMPORTANT: Your response must directly address the USER REQUEST above. " )
-           << wxS( "Use the available tools and commands to fulfill the user's request. " )
-           << wxS( "If the request is unclear, make reasonable assumptions based on schematic design best practices.\n\n" );
-    
-    return prompt;
-}
 
 
 bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
@@ -589,21 +551,6 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 }
 
 
-void SCH_OLLAMA_AGENT_TOOL::initializeSystemPrompt()
-{
-    m_toolCatalog.clear();
-    m_toolCatalog.emplace_back( TOOL_DESCRIPTOR{
-            wxS( "schematic.place_component" ),
-            _( "Places a schematic symbol from the library at the given coordinates (millimeters)." ),
-            wxS( "TOOL schematic.place_component {\"symbol\":\"Device:R\",\"x\":100,\"y\":50,\"reference\":\"R1\"}" ) } );
-    
-    m_toolCatalog.emplace_back( TOOL_DESCRIPTOR{
-            wxS( "schematic.move_component" ),
-            _( "Moves a component to a new position on the schematic." ),
-            wxS( "TOOL schematic.move_component {\"reference\":\"R1\",\"x\":150.0,\"y\":75.0}" ) } );
-
-    m_systemPrompt = GenerateOllamaAgentSystemPrompt( m_toolCatalog );
-}
 
 
 bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload )

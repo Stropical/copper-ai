@@ -59,7 +59,7 @@ class SCHEMATIC;
 class SCH_COMMIT;
 class SCH_DESIGN_BLOCK_PANE;
 class PANEL_REMOTE_SYMBOL;
-class SCH_OLLAMA_AGENT_PANE;
+class WEBVIEW_PANEL;
 class DIALOG_BOOK_REPORTER;
 class DIALOG_ERC;
 class DIALOG_SYMBOL_FIELDS_TABLE;
@@ -1078,7 +1078,7 @@ private:
     std::vector<LIB_ID>         m_designBlockHistoryList;
     SCH_DESIGN_BLOCK_PANE*      m_designBlocksPane;
     PANEL_REMOTE_SYMBOL*        m_remoteSymbolPane;
-    SCH_OLLAMA_AGENT_PANE*      m_ollamaAgentPane;
+    WEBVIEW_PANEL*              m_ollamaAgentPane;
 
     wxChoice*                   m_currentVariantCtrl;
 

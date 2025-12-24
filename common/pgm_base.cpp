@@ -381,7 +381,7 @@ bool PGM_BASE::InitPgm( bool aHeadless, bool aSkipPyInit, bool aIsUnitTest )
     }
 
     // Init parameters for configuration
-    App().SetVendorName(  wxT( "KiCad" ) );
+    App().SetVendorName(  wxT( "CopperAI" ) );
     App().SetAppName( pgm_name );
 
     // Install some image handlers, mainly for help

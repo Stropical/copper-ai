@@ -23,7 +23,6 @@
 #include "sch_tool_base.h"
 #include "sch_agent.h"
 #include "ollama_client.h"
-#include "sch_ollama_agent_prompt.h"
 #include <vector>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -46,8 +45,6 @@ public:
 class SCH_OLLAMA_AGENT_TOOL : public SCH_TOOL_BASE<SCH_EDIT_FRAME>
 {
 public:
-    // Use the shared tool descriptor structure
-    using TOOL_DESCRIPTOR = SCH_OLLAMA_TOOL_DESCRIPTOR;
 
     SCH_OLLAMA_AGENT_TOOL();
     ~SCH_OLLAMA_AGENT_TOOL() override {}
@@ -88,20 +85,6 @@ public:
      */
     bool ParseAndExecute( const wxString& aResponse );
 
-    /**
-     * Build a prompt for the LLM based on user request
-     */
-    wxString BuildPrompt( const wxString& aUserRequest );
-
-    /**
-     * Return the current system prompt shared with the LLM.
-     */
-    const wxString& GetSystemPrompt() const { return m_systemPrompt; }
-
-    /**
-     * Tool descriptors advertised to the agent.
-     */
-    const std::vector<TOOL_DESCRIPTOR>& GetToolCatalog() const { return m_toolCatalog; }
 
     /**
      * Register a handler that will be notified when TOOL lines are encountered.
@@ -115,7 +98,6 @@ public:
     bool RunToolCommand( const wxString& aToolName, const wxString& aPayload );
 
 private:
-    void initializeSystemPrompt();
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
     bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
     bool HandleMoveComponentTool( const nlohmann::json& aPayload );
@@ -124,8 +106,6 @@ private:
     std::unique_ptr<SCH_AGENT> m_agent;
     std::unique_ptr<OLLAMA_CLIENT> m_ollama;
     wxString m_model;  // Default model name
-    wxString m_systemPrompt;
-    std::vector<TOOL_DESCRIPTOR> m_toolCatalog;
     SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
 };
 

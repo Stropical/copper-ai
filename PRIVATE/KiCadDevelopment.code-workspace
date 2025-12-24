@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "Documents",
+			"path": "../../.."
+		},
+		{
+			"name": "plugins",
+			"path": "../../../../../KiCad/9.99/3rdparty/plugins"
+		}
+	],
+	"settings": {}
+}

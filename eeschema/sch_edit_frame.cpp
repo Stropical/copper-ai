@@ -106,7 +106,7 @@
 #include <widgets/bitmap_button.h>
 #include <widgets/sch_properties_panel.h>
 #include <widgets/sch_search_pane.h>
-#include <widgets/sch_ollama_agent_pane.h>
+#include <widgets/webview_panel.h>
 #include <wildcards_and_files_ext.h>
 #include <wx/cmdline.h>
 #include <wx/app.h>
@@ -231,7 +231,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     m_searchPane = new SCH_SEARCH_PANE( this );
     m_propertiesPanel = new SCH_PROPERTIES_PANEL( this, this );
     m_remoteSymbolPane = new PANEL_REMOTE_SYMBOL( this );
-    m_ollamaAgentPane = new SCH_OLLAMA_AGENT_PANE( this );
+    m_ollamaAgentPane = new WEBVIEW_PANEL( this );
 
     m_propertiesPanel->SetSplitterProportion( eeconfig()->m_AuiPanels.properties_splitter );
 
@@ -301,13 +301,62 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     RestoreAuiLayout();
     FinishAUIInitialization();
 
-    // Connect the tool to the panel if available
-    if( GetToolManager() && m_ollamaAgentPane )
+    // Load the agent panel HTML into the WebView
     {
-        SCH_OLLAMA_AGENT_TOOL* tool = GetToolManager()->GetTool<SCH_OLLAMA_AGENT_TOOL>();
-        if( tool )
+        wxFileName htmlPath;
+        bool found = false;
+        
+        // Try multiple locations to find the HTML file
+        
+        // Method 1: Relative to current working directory (for development)
+        htmlPath.AssignDir( wxGetCwd() );
+        htmlPath.AppendDir( wxS( "eeschema" ) );
+        htmlPath.AppendDir( wxS( "widgets" ) );
+        htmlPath.AppendDir( wxS( "agent_panel" ) );
+        htmlPath.AppendDir( wxS( "out" ) );
+        htmlPath.SetFullName( wxS( "index.html" ) );
+        htmlPath.MakeAbsolute();
+        
+        if( htmlPath.FileExists() )
         {
-            m_ollamaAgentPane->SetTool( tool );
+            found = true;
+        }
+        else
+        {
+            // Method 2: Relative to source file location (__FILE__)
+            // __FILE__ is typically: .../eeschema/sch_edit_frame.cpp
+            // We want: .../eeschema/widgets/agent_panel/out/index.html
+            wxString sourceFile( wxS( __FILE__ ) );
+            htmlPath.Assign( sourceFile );
+            // htmlPath now points to .../eeschema/sch_edit_frame.cpp
+            // We need to stay in eeschema/ directory and navigate to widgets/agent_panel/out/
+            // Clear the filename but keep the directory (eeschema/)
+            htmlPath.SetName( wxEmptyString );
+            htmlPath.SetExt( wxEmptyString );
+            htmlPath.AppendDir( wxS( "widgets" ) );
+            htmlPath.AppendDir( wxS( "agent_panel" ) );
+            htmlPath.AppendDir( wxS( "out" ) );
+            htmlPath.SetFullName( wxS( "index.html" ) );
+            htmlPath.MakeAbsolute();
+            
+            if( htmlPath.FileExists() )
+            {
+                found = true;
+            }
+        }
+
+        if( found )
+        {
+            wxString url = wxFileName::FileNameToURL( htmlPath );
+            m_ollamaAgentPane->LoadURL( url );
+        }
+        else
+        {
+            // If HTML file not found, show a simple message
+            wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Agent Panel</h1><p>Build the agent panel first:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd eeschema/widgets/agent_panel<br>npm run build</pre><p>Tried path: " ) 
+                          + htmlPath.GetFullPath() 
+                          + wxS( "</p></body></html>" );
+            m_ollamaAgentPane->SetPage( html );
         }
     }
 
@@ -2912,16 +2961,6 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
 
     wxAuiPaneInfo& agentPane = m_auimgr.GetPane( OllamaAgentPaneName() );
     agentPane.Show( !agentPane.IsShown() );
-
-    // Connect the tool to the panel if showing
-    if( agentPane.IsShown() && GetToolManager() )
-    {
-        SCH_OLLAMA_AGENT_TOOL* tool = GetToolManager()->GetTool<SCH_OLLAMA_AGENT_TOOL>();
-        if( tool )
-        {
-            m_ollamaAgentPane->SetTool( tool );
-        }
-    }
 
     m_auimgr.Update();
 }

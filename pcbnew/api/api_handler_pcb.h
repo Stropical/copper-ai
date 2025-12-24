@@ -128,6 +128,8 @@ private:
     HANDLER_RESULT<NetClassForNetsResponse> handleGetNetClassForNets(
             const HANDLER_CONTEXT<GetNetClassForNets>& aCtx );
 
+    HANDLER_RESULT<RatsnestResponse> handleGetRatsnest( const HANDLER_CONTEXT<GetRatsnest>& aCtx );
+
     HANDLER_RESULT<Empty> handleRefillZones( const HANDLER_CONTEXT<RefillZones>& aCtx );
 
     HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(

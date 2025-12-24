@@ -19,6 +19,53 @@
 
 syntax = "proto3";
 
-package kiapi.schematic.types;
+package kiapi.schematic.commands;
 
+import "common/types/base_types.proto";
+import "schematic/schematic_types.proto";
+
+message GetSchematicData
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+message GetSchematicDataResponse
+{
+  repeated kiapi.schematic.types.Symbol         symbols              = 1;
+  repeated kiapi.schematic.types.Line           wires                = 2;
+  repeated kiapi.schematic.types.Line           buses                = 3;
+  repeated kiapi.schematic.types.LocalLabel     local_labels         = 4;
+  repeated kiapi.schematic.types.GlobalLabel    global_labels        = 5;
+  repeated kiapi.schematic.types.HierarchicalLabel hierarchical_labels = 6;
+}
+
+message PlaceSymbol
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  kiapi.common.types.LibraryIdentifier lib_id   = 2;
+  kiapi.common.types.Vector2           position = 3;
+  string                               reference = 4;
+  string                               value     = 5;
+  uint32                               unit      = 6;
+  double                               rotation  = 7;
+  bool                                 mirror_x  = 8;
+  bool                                 mirror_y  = 9;
+}
+
+message PlaceSymbolResponse
+{
+  kiapi.schematic.types.Symbol symbol = 1;
+}
+
+message PlaceWire
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  repeated kiapi.common.types.Vector2   points   = 2;
+  kiapi.schematic.types.SchematicLayer  layer    = 3;
+}
+
+message PlaceWireResponse
+{
+  repeated kiapi.schematic.types.Line segments = 1;
+}
 

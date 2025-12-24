@@ -11,7 +11,7 @@
                                                             <string>pro</string>
                                                             <string>kicad_pro</string>
                                                         </array>
-                <key>CFBundleTypeName</key>             <string>KiCad project file</string>
+                <key>CFBundleTypeName</key>             <string>CopperAI project file</string>
                 <key>LSHandlerRank</key>                <string>Owner</string>
             </dict>
             <dict>
@@ -31,7 +31,7 @@
     <key>CFBundleIdentifier</key>                   <string>org.kicad.kicad</string>
     <key>CFBundleInfoDictionaryVersion</key>        <string>6.0</string>
     <key>CFBundleLongVersionString</key>            <string>@KICAD_VERSION_FULL@</string>
-    <key>CFBundleName</key>                         <string>KiCad</string>
+    <key>CFBundleName</key>                         <string>CopperAI</string>
     <key>CFBundlePackageType</key>                  <string>APPL</string>
     <key>CFBundleShortVersionString</key>           <string>@KICAD_VERSION@</string>
     <key>CFBundleSignature</key>                    <string>????</string>

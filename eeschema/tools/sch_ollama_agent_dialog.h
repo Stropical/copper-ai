@@ -30,6 +30,9 @@ class wxBoxSizer;
 class wxScrolledWindow;
 class SCH_OLLAMA_AGENT_TOOL;
 
+// Forward declaration for message bubble (defined in .cpp file)
+class MESSAGE_BUBBLE;
+
 /**
  * Chat-style dialog for interacting with Ollama agent.
  * Similar to Cursor's chat interface with message history.
@@ -70,6 +73,8 @@ private:
     wxButton* m_sendButton;
     wxButton* m_clearButton;
     bool m_isProcessing;
+    wxString m_currentResponse;  // Accumulated response during streaming
+    MESSAGE_BUBBLE* m_currentBubble;  // Current streaming bubble
 };
 
 #endif // SCH_OLLAMA_AGENT_DIALOG_H
