@@ -40,6 +40,8 @@ const MODELS = [
   { value: "google/gemma-3-4b", label: "Gemma 3 4B (Google)" },
 ]
 
+const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001/api/pcb/generate"
+
 export function ChatWindow() {
   const [messages, setMessages] = React.useState<Message[]>([
     {
@@ -51,7 +53,8 @@ export function ChatWindow() {
   ])
   const [input, setInput] = React.useState("")
   const [isLoading, setIsLoading] = React.useState(false)
-  const [selectedModel, setSelectedModel] = React.useState("xiaomi/mimo-v2-flash")
+  const [selectedModel, setSelectedModel] = React.useState("google/gemma-3-4b")
+  const [sessionId] = React.useState(() => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
@@ -137,6 +140,55 @@ export function ChatWindow() {
     )
   }
 
+  // Parse tool calls from response text
+  const parseToolCalls = (text: string): ToolCall[] => {
+    const toolCalls: ToolCall[] = []
+    const lines = text.split('\n')
+    
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith('TOOL ')) {
+        const rest = trimmed.slice(5).trim()
+        const spaceIdx = rest.indexOf(' ')
+        if (spaceIdx === -1) continue
+        
+        const toolName = rest.slice(0, spaceIdx).trim()
+        const jsonStr = rest.slice(spaceIdx).trim()
+        
+        try {
+          const args = JSON.parse(jsonStr)
+          toolCalls.push({
+            id: `tool-${Date.now()}-${toolCalls.length}`,
+            name: toolName,
+            arguments: args,
+            status: "pending",
+          })
+        } catch (e) {
+          // Invalid JSON, skip this tool call
+          console.warn('Failed to parse tool call JSON:', jsonStr)
+        }
+      }
+    }
+    
+    return toolCalls
+  }
+
+  // Remove tool calls from text to get clean content
+  const removeToolCalls = (text: string): string => {
+    return text
+      .split('\n')
+      .filter(line => !line.trim().startsWith('TOOL '))
+      .join('\n')
+  }
+
+  // Remove thinking tags (redacted_reasoning tags)
+  const removeThinkingTags = (text: string): string => {
+    return text
+      .replace(/<think>/g, '')
+      .replace(/<\/redacted_reasoning>/g, '')
+      .trim()
+  }
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return
 
@@ -148,51 +200,113 @@ export function ChatWindow() {
     }
 
     setMessages((prev) => [...prev, userMessage])
+    const prompt = input.trim()
     setInput("")
     setIsLoading(true)
 
-    // Add thinking message
-    const thinkingMessage: Message = {
-      id: `thinking-${Date.now()}`,
-      role: "thinking",
-      content: "Thinking...",
-      timestamp: new Date(),
-    }
-    setMessages((prev) => [...prev, thinkingMessage])
-
-    // Simulate AI response with tool calls (replace with actual API call)
-    setTimeout(() => {
-      // Remove thinking message
-      setMessages((prev) => prev.filter((msg) => msg.id !== thinkingMessage.id))
-
-      // Simulate tool calls for demonstration
-      const mockToolCalls: ToolCall[] = [
-        {
-          id: `${Date.now()}-1`,
-          name: "read_file",
-          arguments: { path: "example.py", lines: "1-10" },
-          status: "accepted",
-          displayMode: "text", // Show as simple text
-        },
-        {
-          id: `${Date.now()}-2`,
-          name: "write_file",
-          arguments: { path: "example.py", content: "# Updated content" },
-          status: "pending",
-          displayMode: "card", // Show as card (user can accept/undo)
-        },
-      ]
+    try {
+      // Create assistant message that will be updated as we stream
+      const assistantMessageId = `assistant-${Date.now()}`
+      let accumulatedText = ""
+      let thinkingOpen = false
 
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: assistantMessageId,
         role: "assistant",
-        content: `I'll help you with: "${userMessage.content}". Here are the tool calls I'd like to make:`,
+        content: "",
         timestamp: new Date(),
-        toolCalls: mockToolCalls,
+        toolCalls: [],
       }
       setMessages((prev) => [...prev, assistantMessage])
+
+      // Call the agent API
+      const response = await fetch(AGENT_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Session-ID": sessionId,
+        },
+        body: JSON.stringify({
+          model: selectedModel,
+          prompt: prompt,
+          stream: true,
+          session_id: sessionId,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status} ${response.statusText}`)
+      }
+
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (!reader) {
+        throw new Error("No response body")
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+
+          try {
+            const data = JSON.parse(trimmed)
+            const responseText = data.response || ""
+
+            if (responseText) {
+              accumulatedText += responseText
+
+              // Note: thinking tags are removed from display, but we track them for future use
+
+              // Update message with accumulated text
+              const cleanText = removeThinkingTags(accumulatedText)
+              const toolCalls = parseToolCalls(cleanText)
+              const contentWithoutTools = removeToolCalls(cleanText).trim()
+
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId
+                    ? {
+                        ...msg,
+                        content: contentWithoutTools || "Processing...",
+                        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+                      }
+                    : msg
+                )
+              )
+            }
+
+            if (data.done) {
+              break
+            }
+          } catch (e) {
+            // Skip invalid JSON lines
+            continue
+          }
+        }
+      }
+
       setIsLoading(false)
-    }, 1000)
+    } catch (error) {
+      console.error("Error calling agent API:", error)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `error-${Date.now()}`,
+          role: "assistant",
+          content: `Error: ${error instanceof Error ? error.message : "Failed to get response from agent"}`,
+          timestamp: new Date(),
+        },
+      ])
+      setIsLoading(false)
+    }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
