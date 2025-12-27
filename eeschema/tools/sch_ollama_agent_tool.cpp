@@ -35,6 +35,8 @@
 #include <sch_pin.h>
 #include <sch_field.h>
 #include <sch_connection.h>
+#include <stroke_params.h>
+#include <math/box2.h>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <map>
@@ -734,6 +736,21 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
     }
 
+    if( aToolName.CmpNoCase( wxS( "schematic.add_wire" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleAddWireTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            wxLogWarning( wxS( "[OllamaAgent] add_wire payload parse error: %s" ),
+                          wxString::FromUTF8( e.what() ) );
+            return false;
+        }
+    }
+
     wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), aToolName.wx_str() );
     return false;
 }
@@ -833,6 +850,11 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     commit.Added( newSymbol, screen );
     commit.Push( _( "Place component" ) );
 
+    if( m_frame->GetToolManager() )
+    {
+        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
+    }
+
     return true;
 }
 
@@ -914,6 +936,284 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
     symbol->Move( delta );
 
     commit.Push( wxString::Format( _( "Move component %s" ), reference ) );
+
+    if( m_frame->GetToolManager() )
+    {
+        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, symbol );
+    }
+
+    return true;
+}
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    struct PIN_LOC
+    {
+        VECTOR2I pos;
+        SCH_SCREEN* screen = nullptr;
+    };
+
+    // Resolve pin locations on the CURRENT sheet only (keeps results visible; avoids cross-sheet surprises).
+    auto findPinLocOnCurrentSheet = [&]( const wxString& aReference, const wxString& aPin ) -> std::optional<PIN_LOC>
+    {
+        wxString ref = aReference;
+        wxString pinKey = aPin;
+        ref.Trim( true ).Trim( false );
+        pinKey.Trim( true ).Trim( false );
+
+        if( ref.IsEmpty() || pinKey.IsEmpty() )
+            return std::nullopt;
+
+        SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+        SCH_SCREEN* sc = sheet.LastScreen();
+        if( !sc )
+            return std::nullopt;
+
+        for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            if( !sym )
+                continue;
+
+            wxString candidateRef = sym->GetRef( &sheet, false );
+            if( candidateRef.CmpNoCase( ref ) != 0 )
+                continue;
+
+            std::vector<SCH_PIN*> pins = sym->GetPins( &sheet );
+            for( SCH_PIN* pin : pins )
+            {
+                if( !pin )
+                    continue;
+
+                wxString name = pin->GetShownName();
+                wxString number = pin->GetShownNumber();
+
+                if( ( !name.IsEmpty() && name.CmpNoCase( pinKey ) == 0 )
+                    || ( !number.IsEmpty() && number.CmpNoCase( pinKey ) == 0 ) )
+                {
+                    return PIN_LOC{ pin->GetPosition(), sc };
+                }
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    VECTOR2I start;
+    VECTOR2I end;
+    SCH_SCREEN* targetScreen = nullptr;
+
+    // Mode A: explicit coordinates (mm)
+    if( aPayload.contains( "x1" ) && aPayload.contains( "y1" ) && aPayload.contains( "x2" ) && aPayload.contains( "y2" ) )
+    {
+        if( !aPayload["x1"].is_number() || !aPayload["y1"].is_number() || !aPayload["x2"].is_number() || !aPayload["y2"].is_number() )
+        {
+            DisplayError( m_frame, _( "add_wire tool fields x1, y1, x2, y2 must be numbers (mm)." ) );
+            return false;
+        }
+
+        double x1Mm = aPayload["x1"].get<double>();
+        double y1Mm = aPayload["y1"].get<double>();
+        double x2Mm = aPayload["x2"].get<double>();
+        double y2Mm = aPayload["y2"].get<double>();
+
+        start = VECTOR2I( schIUScale.mmToIU( x1Mm ), schIUScale.mmToIU( y1Mm ) );
+        end   = VECTOR2I( schIUScale.mmToIU( x2Mm ), schIUScale.mmToIU( y2Mm ) );
+        targetScreen = m_frame->GetCurrentSheet().LastScreen();
+    }
+    // Mode B: pin-to-pin
+    else if( aPayload.contains( "from" ) && aPayload.contains( "to" ) && aPayload["from"].is_object() && aPayload["to"].is_object() )
+    {
+        const json& from = aPayload["from"];
+        const json& to = aPayload["to"];
+
+        if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" ) || !to.contains( "pin" ) )
+        {
+            DisplayError( m_frame, _( "add_wire pin mode requires: from{reference,pin}, to{reference,pin}." ) );
+            return false;
+        }
+
+        if( !from["reference"].is_string() || !from["pin"].is_string() || !to["reference"].is_string() || !to["pin"].is_string() )
+        {
+            DisplayError( m_frame, _( "add_wire pin mode fields must be strings." ) );
+            return false;
+        }
+
+        wxString fromRef = wxString::FromUTF8( from["reference"].get<std::string>() );
+        wxString fromPin = wxString::FromUTF8( from["pin"].get<std::string>() );
+        wxString toRef = wxString::FromUTF8( to["reference"].get<std::string>() );
+        wxString toPin = wxString::FromUTF8( to["pin"].get<std::string>() );
+
+        auto startOpt = findPinLocOnCurrentSheet( fromRef, fromPin );
+        auto endOpt = findPinLocOnCurrentSheet( toRef, toPin );
+
+        if( !startOpt || !endOpt )
+        {
+            DisplayError( m_frame, _( "add_wire: could not resolve one or both pin locations on the current sheet." ) );
+            return false;
+        }
+
+        start = startOpt->pos;
+        end = endOpt->pos;
+        targetScreen = startOpt->screen;
+
+        if( !targetScreen || endOpt->screen != targetScreen )
+            return false;
+    }
+    else
+    {
+        DisplayError( m_frame, _( "add_wire requires either x1,y1,x2,y2 (mm) or from/to pin objects." ) );
+        return false;
+    }
+
+    if( !targetScreen )
+        return false;
+
+    // Optional: prefer net labels for long connections if net name is provided.
+    wxString netName;
+    if( aPayload.contains( "net" ) && aPayload["net"].is_string() )
+        netName = wxString::FromUTF8( aPayload["net"].get<std::string>() );
+
+    long long manhattanIU = llabs( (long long) ( end.x - start.x ) ) + llabs( (long long) ( end.y - start.y ) );
+    const long long labelThresholdIU = schIUScale.mmToIU( 60.0 ); // ~60mm
+
+    if( !netName.IsEmpty() && manhattanIU > labelThresholdIU )
+    {
+        // Place labels at both endpoints; local labels will connect nets within the sheet.
+        SCH_LABEL* l1 = new SCH_LABEL();
+        l1->SetPosition( start );
+        l1->SetText( netName );
+        l1->SetParent( targetScreen );
+
+        SCH_LABEL* l2 = new SCH_LABEL();
+        l2->SetPosition( end );
+        l2->SetText( netName );
+        l2->SetParent( targetScreen );
+
+        SCH_COMMIT commit( m_frame );
+        commit.Added( l1, targetScreen );
+        commit.Added( l2, targetScreen );
+        commit.Push( _( "Add net labels" ) );
+
+        if( m_frame->GetToolManager() )
+        {
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
+        }
+
+        if( m_frame->GetCanvas() )
+            m_frame->GetCanvas()->Refresh();
+
+        return true;
+    }
+
+    // Default: orthogonal (Manhattan) routing to avoid diagonal wires.
+    auto addWireSeg = [&]( SCH_COMMIT& aCommit, const VECTOR2I& aA, const VECTOR2I& aB ) -> SCH_LINE*
+    {
+        SCH_LINE* w = new SCH_LINE();
+        w->SetStartPoint( aA );
+        w->SetEndPoint( aB );
+        w->SetLayer( LAYER_WIRE );
+        w->SetStroke( STROKE_PARAMS() );
+        w->SetParent( targetScreen );
+        aCommit.Added( w, targetScreen );
+        return w;
+    };
+
+    auto segmentHitsSymbol = [&]( const VECTOR2I& aA, const VECTOR2I& aB ) -> int
+    {
+        if( aA == aB )
+            return 0;
+
+        // Only score axis-aligned segments.
+        const bool vertical = aA.x == aB.x;
+        const bool horizontal = aA.y == aB.y;
+        if( !vertical && !horizontal )
+            return 0;
+
+        int hits = 0;
+
+        for( SCH_ITEM* item : targetScreen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            if( !sym )
+                continue;
+
+            BOX2I bbox = sym->GetBoundingBox();
+
+            // Expand by ~1mm margin
+            const int margin = schIUScale.mmToIU( 1.0 );
+            bbox.Inflate( margin, margin );
+
+            const int xMin = bbox.GetX();
+            const int xMax = bbox.GetRight();
+            const int yMin = bbox.GetY();
+            const int yMax = bbox.GetBottom();
+
+            if( vertical )
+            {
+                const int x = aA.x;
+                const int y1 = std::min( aA.y, aB.y );
+                const int y2 = std::max( aA.y, aB.y );
+                if( x >= xMin && x <= xMax && !( y2 < yMin || y1 > yMax ) )
+                    hits++;
+            }
+            else if( horizontal )
+            {
+                const int y = aA.y;
+                const int x1 = std::min( aA.x, aB.x );
+                const int x2 = std::max( aA.x, aB.x );
+                if( y >= yMin && y <= yMax && !( x2 < xMin || x1 > xMax ) )
+                    hits++;
+            }
+        }
+
+        return hits;
+    };
+
+    VECTOR2I bend1( end.x, start.y );
+    VECTOR2I bend2( start.x, end.y );
+
+    int score1 = segmentHitsSymbol( start, bend1 ) + segmentHitsSymbol( bend1, end );
+    int score2 = segmentHitsSymbol( start, bend2 ) + segmentHitsSymbol( bend2, end );
+
+    VECTOR2I bend = ( score2 < score1 ) ? bend2 : bend1;
+
+    SCH_COMMIT commit( m_frame );
+    std::vector<SCH_LINE*> newWires;
+
+    if( start.x == end.x || start.y == end.y )
+    {
+        newWires.push_back( addWireSeg( commit, start, end ) );
+    }
+    else
+    {
+        newWires.push_back( addWireSeg( commit, start, bend ) );
+        newWires.push_back( addWireSeg( commit, bend, end ) );
+    }
+
+    commit.Push( _( "Add wire" ) );
+
+    if( m_frame->GetToolManager() )
+    {
+        for( SCH_LINE* w : newWires )
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
+    }
+
+    // Ensure the canvas refreshes so the new wire is visible immediately.
+    if( m_frame->GetCanvas() )
+    {
+        if( auto view = m_frame->GetCanvas()->GetView() )
+        {
+            for( SCH_LINE* w : newWires )
+                view->Update( w );
+        }
+
+        m_frame->GetCanvas()->Refresh();
+    }
 
     return true;
 }

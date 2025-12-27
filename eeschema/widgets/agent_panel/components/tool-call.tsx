@@ -29,19 +29,22 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
   // Extract a compact summary of arguments
   let argsSummary = ""
   if (typeof toolCall.arguments === "string") {
-    argsSummary = toolCall.arguments.length > 50 
-      ? toolCall.arguments.substring(0, 50) + "..." 
+    argsSummary = toolCall.arguments.length > 120
+      ? toolCall.arguments.substring(0, 120) + "..."
       : toolCall.arguments
   } else if (typeof toolCall.arguments === "object" && toolCall.arguments !== null) {
-    // Create a compact summary
-    const keys = Object.keys(toolCall.arguments)
-    if (keys.length === 1) {
-      argsSummary = `${keys[0]}: ${JSON.stringify(toolCall.arguments[keys[0]])}`
+    const args = toolCall.arguments as Record<string, any>
+
+    // Special-case wiring to show something human readable
+    if (args.from?.reference && args.from?.pin && args.to?.reference && args.to?.pin) {
+      argsSummary = `${args.from.reference}:${args.from.pin} → ${args.to.reference}:${args.to.pin}`
     } else {
-      argsSummary = `${keys.length} args`
+      // Fallback: compact JSON
+      argsSummary = JSON.stringify(args)
     }
-    if (argsSummary.length > 50) {
-      argsSummary = argsSummary.substring(0, 50) + "..."
+
+    if (argsSummary.length > 160) {
+      argsSummary = argsSummary.substring(0, 160) + "..."
     }
   }
 

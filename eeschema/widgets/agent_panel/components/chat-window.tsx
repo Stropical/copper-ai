@@ -42,10 +42,33 @@ export function ChatWindow() {
   const queuedPromptRef = React.useRef<string | null>(null)
   const rpcWaitersRef = React.useRef(new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>())
   const rpcIdRef = React.useRef(0)
+  const abortControllerRef = React.useRef<AbortController | null>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }
+
+  const stopStreaming = React.useCallback(() => {
+    if (abortControllerRef.current) {
+      try {
+        abortControllerRef.current.abort()
+      } catch {
+        // ignore
+      } finally {
+        abortControllerRef.current = null
+      }
+    }
+  }, [])
+
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        stopStreaming()
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [stopStreaming])
 
   // --- KiCad WebView RPC bridge (to fetch schematic context) ---
   const postToKiCad = (payload: string): boolean => {
@@ -142,36 +165,123 @@ export function ChatWindow() {
     }
   }
 
-  const handleToolCallAccept = (messageId: string, toolCallId: string) => {
+  const runToolCallNow = async (messageId: string, toolCallId: string, toolName: string, payload: any) => {
+    // Mark running
     setMessages((prev) =>
       prev.map((msg) => {
-        if (msg.id === messageId) {
+        if (msg.id !== messageId) return msg
+        const updatedToolCalls = msg.toolCalls?.map((tc) =>
+          tc.id === toolCallId ? { ...tc, status: "running" as const } : tc
+        )
+        return { ...msg, toolCalls: updatedToolCalls }
+      })
+    )
+
+    try {
+      const resp = await sendRpcCommand("RUN_TOOL", { tool_name: toolName, payload })
+      const ok = resp?.status === "OK"
+
+      // After execution, keep it as "pending" until the user explicitly Accepts.
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== messageId) return msg
           const updatedToolCalls = msg.toolCalls?.map((tc) =>
             tc.id === toolCallId
-              ? { ...tc, status: "accepted" as const }
+              ? {
+                  ...tc,
+                  status: ok ? ("pending" as const) : ("rejected" as const),
+                  result: ok ? "Applied (awaiting accept)" : (resp?.error_message || "Execution failed"),
+                }
               : tc
           )
           return { ...msg, toolCalls: updatedToolCalls }
-        }
-        return msg
+        })
+      )
+    } catch (e: any) {
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== messageId) return msg
+          const updatedToolCalls = msg.toolCalls?.map((tc) =>
+            tc.id === toolCallId
+              ? {
+                  ...tc,
+                  status: "rejected" as const,
+                  result: e?.message || "Execution failed",
+                }
+              : tc
+          )
+          return { ...msg, toolCalls: updatedToolCalls }
+        })
+      )
+    }
+  }
+
+  const handleToolCallAccept = (messageId: string, toolCallId: string) => {
+    // Tools now auto-run on arrival. Accept = "keep" (no-op in KiCad).
+    void sendRpcCommand("CLEAR_SELECTION", {})
+    setMessages((prev) =>
+      prev.map((msg) => {
+        if (msg.id !== messageId) return msg
+        const updatedToolCalls = msg.toolCalls?.map((tc) =>
+          tc.id === toolCallId && tc.status === "pending" ? { ...tc, status: "accepted" as const } : tc
+        )
+        return { ...msg, toolCalls: updatedToolCalls }
       })
     )
   }
 
   const handleToolCallUndo = (messageId: string, toolCallId: string) => {
+    // Undo = revert the last applied KiCad operation (undo-stack semantics).
     setMessages((prev) =>
       prev.map((msg) => {
-        if (msg.id === messageId) {
-          const updatedToolCalls = msg.toolCalls?.map((tc) =>
-            tc.id === toolCallId
-              ? { ...tc, status: "rejected" as const }
-              : tc
-          )
-          return { ...msg, toolCalls: updatedToolCalls }
-        }
-        return msg
+        if (msg.id !== messageId) return msg
+        const updatedToolCalls = msg.toolCalls?.map((tc) =>
+          tc.id === toolCallId ? { ...tc, status: "running" as const } : tc
+        )
+        return { ...msg, toolCalls: updatedToolCalls }
       })
     )
+
+    ;(async () => {
+      try {
+        const resp = await sendRpcCommand("UNDO", { count: 1 })
+        void sendRpcCommand("CLEAR_SELECTION", {})
+        const ok = resp?.status === "OK"
+
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== messageId) return msg
+            const updatedToolCalls = msg.toolCalls?.map((tc) =>
+              tc.id === toolCallId
+                ? {
+                    ...tc,
+                    status: ok ? ("rejected" as const) : ("accepted" as const),
+                    result: ok ? "Undone" : (resp?.error_message || "Undo failed"),
+                  }
+                : tc
+            )
+            return { ...msg, toolCalls: updatedToolCalls }
+          })
+        )
+      } catch (e: any) {
+        void sendRpcCommand("CLEAR_SELECTION", {})
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== messageId) return msg
+            const updatedToolCalls = msg.toolCalls?.map((tc) =>
+              tc.id === toolCallId
+                ? {
+                    ...tc,
+                    status: "accepted" as const,
+                    result: e?.message || "Undo failed",
+                  }
+                : tc
+            )
+            return { ...msg, toolCalls: updatedToolCalls }
+          })
+        )
+      }
+    })()
   }
 
   // Get the latest assistant message with tool calls
@@ -191,34 +301,73 @@ export function ChatWindow() {
 
   const handleAcceptAll = () => {
     if (!latestMessageWithToolCalls) return
+    void sendRpcCommand("CLEAR_SELECTION", {})
+    // Tools already ran; Accept All just keeps them.
     setMessages((prev) =>
       prev.map((msg) => {
-        if (msg.id === latestMessageWithToolCalls.id) {
-          const updatedToolCalls = msg.toolCalls?.map((tc) =>
-            tc.status === "pending" ? { ...tc, status: "accepted" as const } : tc
-          )
-          return { ...msg, toolCalls: updatedToolCalls }
-        }
-        return msg
+        if (msg.id !== latestMessageWithToolCalls.id) return msg
+        const updatedToolCalls = msg.toolCalls?.map((tc) =>
+          tc.status === "pending" ? { ...tc, status: "accepted" as const } : tc
+        )
+        return { ...msg, toolCalls: updatedToolCalls }
       })
     )
   }
 
   const handleUndoAll = () => {
     if (!latestMessageWithToolCalls) return
+    const countToUndo =
+      latestMessageWithToolCalls.toolCalls?.filter((tc) => tc.status === "accepted" || tc.status === "pending").length ||
+      0
+
+    if (countToUndo <= 0) return
+
+    // Mark as running
     setMessages((prev) =>
       prev.map((msg) => {
-        if (msg.id === latestMessageWithToolCalls.id) {
-          const updatedToolCalls = msg.toolCalls?.map((tc) =>
-            tc.status === "accepted" || tc.status === "pending"
-              ? { ...tc, status: "rejected" as const }
-              : tc
-          )
-          return { ...msg, toolCalls: updatedToolCalls }
-        }
-        return msg
+        if (msg.id !== latestMessageWithToolCalls.id) return msg
+        const updatedToolCalls = msg.toolCalls?.map((tc) =>
+          tc.status === "accepted" || tc.status === "pending" ? { ...tc, status: "running" as const } : tc
+        )
+        return { ...msg, toolCalls: updatedToolCalls }
       })
     )
+
+    ;(async () => {
+      try {
+        const resp = await sendRpcCommand("UNDO", { count: countToUndo })
+        void sendRpcCommand("CLEAR_SELECTION", {})
+        const ok = resp?.status === "OK"
+
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== latestMessageWithToolCalls.id) return msg
+            const updatedToolCalls = msg.toolCalls?.map((tc) =>
+              tc.status === "running"
+                ? {
+                    ...tc,
+                    status: ok ? ("rejected" as const) : ("accepted" as const),
+                    result: ok ? "Undone" : (resp?.error_message || "Undo failed"),
+                  }
+                : tc
+            )
+            return { ...msg, toolCalls: updatedToolCalls }
+          })
+        )
+      } catch {
+        void sendRpcCommand("CLEAR_SELECTION", {})
+        // If undo failed, leave them accepted.
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id !== latestMessageWithToolCalls.id) return msg
+            const updatedToolCalls = msg.toolCalls?.map((tc) =>
+              tc.status === "running" ? { ...tc, status: "accepted" as const, result: "Undo failed" } : tc
+            )
+            return { ...msg, toolCalls: updatedToolCalls }
+          })
+        )
+      }
+    })()
   }
 
   // Parse tool calls from response text
@@ -262,12 +411,51 @@ export function ChatWindow() {
       .join('\n')
   }
 
-  // Remove thinking tags (redacted_reasoning tags)
-  const removeThinkingTags = (text: string): string => {
-    return text
-      .replace(/<think>/g, '')
-      .replace(/<\/redacted_reasoning>/g, '')
-      .trim()
+  // Split <think>...</think> blocks out of the streamed text.
+  // Returns:
+  // - visibleText: content excluding the full <think> blocks
+  // - thinkingText: concatenated thinking content
+  // - thinkingOpen: true if we saw an opening <think> without a closing </think> yet
+  const splitThinking = (text: string): { visibleText: string; thinkingText: string; thinkingOpen: boolean } => {
+    const OPEN = "<think>"
+    const CLOSE = "</think>"
+
+    let remaining = text || ""
+    let visible = ""
+    let thinking = ""
+    let open = false
+
+    while (remaining.length > 0) {
+      const openIdx = remaining.indexOf(OPEN)
+      if (openIdx === -1) {
+        visible += remaining
+        break
+      }
+
+      // Append visible chunk before <think>
+      visible += remaining.slice(0, openIdx)
+      remaining = remaining.slice(openIdx + OPEN.length)
+
+      const closeIdx = remaining.indexOf(CLOSE)
+      if (closeIdx === -1) {
+        open = true
+        thinking += remaining
+        break
+      }
+
+      thinking += remaining.slice(0, closeIdx)
+      remaining = remaining.slice(closeIdx + CLOSE.length)
+    }
+
+    // Some models/users may include stray tags; clean up lightly.
+    visible = visible.replace(/<\/redacted_reasoning>/g, "")
+    thinking = thinking.replace(/<\/redacted_reasoning>/g, "")
+
+    return {
+      visibleText: visible,
+      thinkingText: thinking.trim(),
+      thinkingOpen: open,
+    }
   }
 
   const sendPrompt = async (promptText: string) => {
@@ -285,13 +473,18 @@ export function ChatWindow() {
     setIsLoading(true)
 
     try {
+      const abortController = new AbortController()
+      abortControllerRef.current = abortController
+
       // Include KiCad schematic context if available
       const schematicContext = await tryGetSchematicContext()
       const requestPrompt = schematicContext ? `${trimmedPrompt}\n\n${schematicContext}` : trimmedPrompt
 
-      // Create assistant message that will be updated as we stream
+      // Create thinking + assistant messages that will be updated as we stream
       const assistantMessageId = `assistant-${Date.now()}`
+      const thinkingMessageId = `thinking-${assistantMessageId}`
       let accumulatedText = ""
+      let lastVisibleText = ""
 
       const assistantMessage: Message = {
         id: assistantMessageId,
@@ -300,7 +493,14 @@ export function ChatWindow() {
         timestamp: new Date(),
         toolCalls: [],
       }
-      setMessages((prev) => [...prev, assistantMessage])
+      const thinkingMessage: Message = {
+        id: thinkingMessageId,
+        role: "thinking",
+        content: "",
+        timestamp: new Date(),
+      }
+
+      setMessages((prev) => [...prev, thinkingMessage, assistantMessage])
 
       const response = await fetch(AGENT_API_URL, {
         method: "POST",
@@ -308,6 +508,7 @@ export function ChatWindow() {
           "Content-Type": "application/json",
           "X-Session-ID": sessionId,
         },
+        signal: abortController.signal,
         body: JSON.stringify({
           model: selectedModel,
           prompt: requestPrompt,
@@ -346,8 +547,9 @@ export function ChatWindow() {
               accumulatedText += responseText
 
               // Update message with accumulated text (but don't show tool calls yet)
-              const cleanText = removeThinkingTags(accumulatedText)
-              const contentWithoutTools = removeToolCalls(cleanText).trim()
+              const { visibleText, thinkingText, thinkingOpen } = splitThinking(accumulatedText)
+              lastVisibleText = visibleText
+              const contentWithoutTools = removeToolCalls(visibleText).trim()
 
               setMessages((prev) =>
                 prev.map((msg) =>
@@ -359,11 +561,40 @@ export function ChatWindow() {
                     : msg
                 )
               )
+
+              // Update the thinking row (smaller/darker UI in render). If no thinking, keep hidden.
+              if (thinkingText || thinkingOpen) {
+                const displayThinking = thinkingOpen
+                  ? `Thinking…\n${thinkingText}`.trim()
+                  : thinkingText
+
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === thinkingMessageId
+                      ? {
+                          ...msg,
+                          content: displayThinking,
+                        }
+                      : msg
+                  )
+                )
+              } else {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === thinkingMessageId
+                      ? {
+                          ...msg,
+                          content: "",
+                        }
+                      : msg
+                  )
+                )
+              }
             }
 
             if (data.done) {
-              const cleanText = removeThinkingTags(accumulatedText)
-              const toolCalls = parseToolCalls(cleanText)
+              // Only parse tool calls from the visible (non-<think>) text.
+              const toolCalls = parseToolCalls(lastVisibleText)
 
               if (toolCalls.length > 0) {
                 console.info("Tool calls detected:", toolCalls)
@@ -377,7 +608,25 @@ export function ChatWindow() {
                       : msg
                   )
                 )
+
+                // Auto-run tool calls immediately as they arrive.
+                for (const tc of toolCalls) {
+                  await runToolCallNow(assistantMessageId, tc.id, tc.name, tc.arguments)
+                }
               }
+
+              // When finished, keep thinking text only if it exists; otherwise hide it.
+              const { thinkingText } = splitThinking(accumulatedText)
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === thinkingMessageId
+                    ? {
+                        ...msg,
+                        content: thinkingText,
+                      }
+                    : msg
+                )
+              )
               break
             }
           } catch (e) {
@@ -386,6 +635,15 @@ export function ChatWindow() {
         }
       }
     } catch (error) {
+      // Abort is a normal "stop" path
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.role === "assistant" && msg.content === "" ? { ...msg, content: "Stopped." } : msg
+          )
+        )
+        return
+      }
       console.error("Error calling agent API:", error)
       setMessages((prev) => [
         ...prev,
@@ -397,6 +655,7 @@ export function ChatWindow() {
         },
       ])
     } finally {
+      abortControllerRef.current = null
       setIsLoading(false)
 
       // Auto-send queued prompt (if you typed ahead while streaming)
@@ -455,10 +714,14 @@ export function ChatWindow() {
 
       {/* Messages */}
       <ScrollArea className="flex-1">
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-4 px-4 py-4 overflow-x-hidden">
           {messages.map((message) => {
             // Handle thinking messages
             if (message.role === "thinking") {
+              if (!message.content.trim()) {
+                return null
+              }
+
               return (
                 <div key={message.id} className="flex gap-3 justify-start">
                   <Avatar className="h-6 w-6 shrink-0 border border-[#2C333D]">
@@ -466,7 +729,11 @@ export function ChatWindow() {
                       <Bot className="h-3 w-3" />
                     </AvatarFallback>
                   </Avatar>
-                  <div className="text-xs text-[#9AA3AD] font-mono py-1">
+                  <div
+                    className={`min-w-0 max-w-[80%] text-[11px] leading-snug text-[#7C8590] font-mono py-1 whitespace-pre-wrap break-words ${
+                      isLoading ? "animate-pulse" : ""
+                    }`}
+                  >
                     {message.content}
                   </div>
                 </div>
@@ -541,6 +808,16 @@ export function ChatWindow() {
             disabled={false}
             className="flex-1 border-[#2C333D] bg-[#151A21] text-[#E7E9EC] placeholder:text-[#9AA3AD] focus:border-[#C7773A] focus:ring-[#C7773A]/40 h-9 text-sm"
           />
+          {isLoading && (
+            <Button
+              onClick={stopStreaming}
+              variant="outline"
+              className="h-9 px-3 border-[#2C333D] bg-[#151A21] text-[#E7E9EC] hover:bg-[#1C222B]"
+            >
+              <X className="h-3.5 w-3.5 mr-1" />
+              Stop
+            </Button>
+          )}
           <Button
             onClick={handleSend}
             disabled={!input.trim()}

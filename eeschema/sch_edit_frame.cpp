@@ -383,6 +383,88 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                             response["status"] = "OK";
                             response["data"] = context.ToUTF8().data();
                         }
+                        else if( command == "RUN_TOOL" )
+                        {
+                            std::string toolName;
+                            std::string payloadStr;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "tool_name" ) && params["tool_name"].is_string() )
+                                    toolName = params["tool_name"].get<std::string>();
+
+                                if( params.contains( "payload" ) )
+                                {
+                                    if( params["payload"].is_string() )
+                                        payloadStr = params["payload"].get<std::string>();
+                                    else if( params["payload"].is_object() )
+                                        payloadStr = params["payload"].dump();
+                                }
+                            }
+
+                            if( toolName.empty() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Missing parameters.tool_name";
+                            }
+                            else if( !m_toolManager )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Tool manager not available";
+                            }
+                            else
+                            {
+                                bool ok = false;
+
+                                if( SCH_OLLAMA_AGENT_TOOL* tool = m_toolManager->GetTool<SCH_OLLAMA_AGENT_TOOL>() )
+                                {
+                                    ok = tool->RunToolCommand( wxString::FromUTF8( toolName.c_str() ),
+                                                               wxString::FromUTF8( payloadStr.c_str() ) );
+                                }
+
+                                response["status"] = ok ? "OK" : "ERROR";
+                                if( !ok )
+                                    response["error_message"] = "Tool execution failed";
+                            }
+                        }
+                        else if( command == "UNDO" )
+                        {
+                            int count = 1;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "count" ) && params["count"].is_number_integer() )
+                                    count = std::max( 1, params["count"].get<int>() );
+                            }
+
+                            if( !m_toolManager )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Tool manager not available";
+                            }
+                            else
+                            {
+                                for( int i = 0; i < count; i++ )
+                                    m_toolManager->RunAction( ACTIONS::undo );
+
+                                response["status"] = "OK";
+                            }
+                        }
+                        else if( command == "CLEAR_SELECTION" )
+                        {
+                            if( !m_toolManager )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Tool manager not available";
+                            }
+                            else
+                            {
+                                m_toolManager->RunAction( ACTIONS::selectionClear );
+                                response["status"] = "OK";
+                            }
+                        }
                         else
                         {
                             response["status"] = "ERROR";

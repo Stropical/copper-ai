@@ -109,6 +109,7 @@ private:
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
     bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
     bool HandleMoveComponentTool( const nlohmann::json& aPayload );
+    bool HandleAddWireTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
