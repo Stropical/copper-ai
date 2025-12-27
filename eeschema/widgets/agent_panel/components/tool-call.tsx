@@ -48,23 +48,23 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
   return (
     <div className={cn(
       "flex items-center gap-2 px-2 py-1 rounded border text-xs transition-all",
-      "border-[#2A2A2A] bg-[#1A1A1A] text-[#E5E5E5]",
-      isAccepted && "border-[#FF6B35]/50 bg-[#FF6B35]/10",
+      "border-[#2C333D] bg-[#151A21] text-[#E7E9EC]",
+      isAccepted && "border-[#C7773A]/50 bg-[#C7773A]/10",
       isRejected && "border-red-500/30 bg-red-500/5"
     )}>
       {/* Status indicator */}
       <div className="shrink-0">
-        {isPending && <span className="text-[#666666]">○</span>}
-        {isRunning && <Loader2 className="h-3 w-3 animate-spin text-[#FF6B35]" />}
-        {isAccepted && <Check className="h-3 w-3 text-[#FF6B35]" />}
+        {isPending && <span className="text-[#9AA3AD]">○</span>}
+        {isRunning && <Loader2 className="h-3 w-3 animate-spin text-[#C7773A]" />}
+        {isAccepted && <Check className="h-3 w-3 text-[#C7773A]" />}
         {isRejected && <X className="h-3 w-3 text-red-500/70" />}
       </div>
 
       {/* Tool name and args */}
       <div className="flex-1 min-w-0">
-        <span className="font-mono text-[#E5E5E5]">{toolCall.name}</span>
+        <span className="font-mono text-[#E7E9EC]">{toolCall.name}</span>
         {argsSummary && (
-          <span className="text-[#666666] ml-2">{argsSummary}</span>
+          <span className="text-[#9AA3AD] ml-2">{argsSummary}</span>
         )}
       </div>
 
@@ -77,9 +77,9 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
                 size="sm"
                 variant="ghost"
                 onClick={() => onAccept(toolCall.id)}
-                className="h-5 w-5 p-0 hover:bg-[#FF6B35]/20"
+                className="h-5 w-5 p-0 hover:bg-[#C7773A]/20"
               >
-                <Check className="h-3 w-3 text-[#FF6B35]" />
+                <Check className="h-3 w-3 text-[#C7773A]" />
               </Button>
               <Button
                 size="sm"

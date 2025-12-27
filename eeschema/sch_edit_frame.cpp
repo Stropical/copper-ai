@@ -100,6 +100,7 @@
 #include <tools/sch_ollama_agent_tool.h>
 #include <trace_helpers.h>
 #include <unordered_set>
+#include <nlohmann/json.hpp>
 #include <view/view_controls.h>
 #include <widgets/wx_infobar.h>
 #include <widgets/hierarchy_pane.h>
@@ -117,6 +118,8 @@
 #include <widgets/wx_aui_utils.h>
 #include <drawing_sheet/ds_proxy_view_item.h>
 #include <project/project_local_settings.h>
+
+using json = nlohmann::json;
 #include <toolbars_sch_editor.h>
 #include <wx/log.h>
 #include <wx/choicdlg.h>
@@ -308,6 +311,96 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     {
         try
         {
+            // Register KiCad <-> WebView RPC for the agent panel.
+            //
+            // JS side (agent_panel) sends to handler "kicad" using:
+            //   window.webkit.messageHandlers.kicad.postMessage(JSON.stringify({...}))
+            //
+            // We respond by running:
+            //   window.kiclient.postMessage('<json>');
+            //
+            // Expected request:
+            //   {"command":"GET_SCHEMATIC_CONTEXT","message_id":1,"parameters":{"max_chars":50000}}
+            //
+            // Response:
+            //   {"command":"GET_SCHEMATIC_CONTEXT","response_to":1,"status":"OK","data":"..."}
+            m_ollamaAgentPane->AddMessageHandler( wxS( "kicad" ),
+                    [this]( const wxString& aPayload )
+                    {
+                        auto sanitizeForScript = []( const std::string& aJsonStr ) -> wxString
+                        {
+                            wxString s = wxString::FromUTF8( aJsonStr.c_str() );
+                            s.Replace( "\\", "\\\\" );
+                            s.Replace( "'", "\\'" );
+                            return s;
+                        };
+
+                        wxScopedCharBuffer utf8 = aPayload.ToUTF8();
+                        if( !utf8 || utf8.length() == 0 )
+                            return;
+
+                        json request;
+                        try
+                        {
+                            request = json::parse( utf8.data() );
+                        }
+                        catch( const std::exception& )
+                        {
+                            return;
+                        }
+
+                        if( !request.is_object() )
+                            return;
+
+                        const std::string command = request.value( "command", std::string() );
+                        const int messageId = request.value( "message_id", 0 );
+
+                        if( command.empty() || messageId <= 0 )
+                            return;
+
+                        json response = json::object();
+                        response["command"] = command;
+                        response["response_to"] = messageId;
+
+                        if( command == "GET_SCHEMATIC_CONTEXT" )
+                        {
+                            size_t maxChars = 50000;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "max_chars" ) && params["max_chars"].is_number_integer() )
+                                    maxChars = static_cast<size_t>( params["max_chars"].get<long long>() );
+                            }
+
+                            wxString context;
+                            if( m_toolManager )
+                            {
+                                if( SCH_OLLAMA_AGENT_TOOL* tool = m_toolManager->GetTool<SCH_OLLAMA_AGENT_TOOL>() )
+                                    context = tool->GetFullSchematicContext( maxChars );
+                            }
+
+                            response["status"] = "OK";
+                            response["data"] = context.ToUTF8().data();
+                        }
+                        else
+                        {
+                            response["status"] = "ERROR";
+                            response["error_message"] = "Unknown command";
+                        }
+
+                        if( !m_ollamaAgentPane || m_ollamaAgentPane->HasLoadError() )
+                            return;
+
+                        wxString script = wxString::Format(
+                                wxS( "window.kiclient && window.kiclient.postMessage('%s');" ),
+                                sanitizeForScript( response.dump() ) );
+                        m_ollamaAgentPane->RunScriptAsync( script );
+                    } );
+
+            // Script message handlers are registered on load; ensure loaded is bound.
+            m_ollamaAgentPane->BindLoadedEvent();
+
             wxFileName htmlPath;
             bool found = false;
             

@@ -81,6 +81,14 @@ public:
     wxString GetModel() const { return m_model; }
 
     /**
+     * Build a complete context snapshot of the currently loaded schematic hierarchy.
+     * This is intended to be appended to user requests before sending to the Python pcb_agent.
+     *
+     * @param aMaxChars Maximum size of the returned context string. If exceeded, the output is truncated.
+     */
+    wxString GetFullSchematicContext( size_t aMaxChars = 50000 );
+
+    /**
      * Parse and execute response (for dialog access)
      */
     bool ParseAndExecute( const wxString& aResponse );

@@ -356,9 +356,14 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
             }
         };
         
-        // Send raw user request to Python agent (which handles all prompt building)
-        success = m_tool->GetOllama()->StreamChatCompletion( 
-            m_tool->GetModel(), message, chunkCallback, fullResponse );
+        // Append full schematic context before sending to Python pcb_agent.
+        wxString prompt = message;
+        wxString context = m_tool->GetFullSchematicContext();
+        if( !context.IsEmpty() )
+            prompt << wxS( "\n\n" ) << context;
+
+        success = m_tool->GetOllama()->StreamChatCompletion(
+            m_tool->GetModel(), prompt, chunkCallback, fullResponse );
         
         if( success )
         {

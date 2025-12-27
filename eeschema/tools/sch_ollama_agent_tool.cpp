@@ -37,6 +37,8 @@
 #include <sch_connection.h>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <map>
+#include <vector>
 
 using json = nlohmann::json;
 #include <sch_commit.h>
@@ -100,9 +102,15 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
         }
     }
 
-    // Send raw user request to Python agent (which handles all prompt building)
+    // Append full schematic context before sending to Python pcb_agent.
+    wxString context = GetFullSchematicContext();
+    wxString prompt = userRequest;
+    if( !context.IsEmpty() )
+        prompt << wxS( "\n\n" ) << context;
+
+    // Send request to Python agent (which handles prompt building, RAG, etc.)
     wxString response;
-    if( !m_ollama->ChatCompletion( m_model, userRequest, response ) )
+    if( !m_ollama->ChatCompletion( m_model, prompt, response ) )
     {
         DisplayError( m_frame, _( "Failed to communicate with Python agent server." ) );
         return 0;
@@ -386,6 +394,140 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
     }
 
     return content;
+}
+
+wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
+{
+    if( !m_frame )
+        return wxEmptyString;
+
+    SCHEMATIC& schematic = m_frame->Schematic();
+    SCH_SHEET_LIST sheets = schematic.Hierarchy();
+    sheets.SortByPageNumbers();
+
+    wxString out;
+    out << wxS( "KICAD_SCHEMATIC_CONTEXT (all sheets)\n" );
+    out << wxS( "Current sheet: " ) << m_frame->GetFullScreenDesc() << wxS( "\n" );
+    out << wxS( "Sheet count: " ) << wxString::Format( wxS( "%d" ), (int) sheets.size() ) << wxS( "\n\n" );
+
+    // Netlist-ish view built from per-pin connections.
+    std::map<wxString, std::vector<wxString>> netToNodes;
+
+    for( const SCH_SHEET_PATH& sheetPath : sheets )
+    {
+        SCH_SCREEN* screen = sheetPath.LastScreen();
+        if( !screen )
+            continue;
+
+        out << wxS( "=== SHEET ===\n" );
+        out << wxS( "Path: " ) << sheetPath.PathHumanReadable() << wxS( "\n" );
+        out << wxS( "Page: " ) << sheetPath.GetPageNumber() << wxS( "\n" );
+        if( sheetPath.Last() )
+            out << wxS( "File: " ) << sheetPath.Last()->GetFileName() << wxS( "\n" );
+
+        int componentCount = 0;
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            if( !symbol )
+                continue;
+
+            componentCount++;
+
+            wxString ref = symbol->GetRef( &sheetPath, true );
+            wxString libId = symbol->GetLibId().Format();
+
+            wxString value;
+            wxString footprint;
+            wxString datasheet;
+
+            SCH_FIELDS fields = symbol->GetFields();
+            for( const SCH_FIELD& field : fields )
+            {
+                if( field.GetText().IsEmpty() )
+                    continue;
+
+                wxString name = field.GetName();
+                if( name.IsEmpty() )
+                    continue;
+
+                if( name.CmpNoCase( wxS( "Value" ) ) == 0 )
+                    value = field.GetText();
+                else if( name.CmpNoCase( wxS( "Footprint" ) ) == 0 )
+                    footprint = field.GetText();
+                else if( name.CmpNoCase( wxS( "Datasheet" ) ) == 0 )
+                    datasheet = field.GetText();
+            }
+
+            out << wxS( "- " ) << ref << wxS( " (" ) << libId << wxS( ")" );
+            if( !value.IsEmpty() )
+                out << wxS( " value=" ) << value;
+            if( !footprint.IsEmpty() )
+                out << wxS( " footprint=" ) << footprint;
+            if( !datasheet.IsEmpty() )
+                out << wxS( " datasheet=" ) << datasheet;
+            out << wxS( "\n" );
+
+            std::vector<SCH_PIN*> pins = symbol->GetPins( &sheetPath );
+            for( SCH_PIN* pin : pins )
+            {
+                if( !pin )
+                    continue;
+
+                wxString pinNumber = pin->GetShownNumber();
+                wxString pinName = pin->GetShownName();
+
+                wxString netName = wxS( "<unconnected>" );
+                if( SCH_CONNECTION* conn = pin->Connection( &sheetPath ) )
+                {
+                    netName = conn->Name();
+                    if( netName.IsEmpty() )
+                        netName = wxS( "<unnamed>" );
+                }
+
+                wxString node = ref + wxS( ":" ) + pinNumber;
+                if( !pinName.IsEmpty() )
+                    node << wxS( "(" ) << pinName << wxS( ")" );
+
+                netToNodes[netName].push_back( node );
+            }
+
+            if( aMaxChars > 0 && (size_t) out.length() > aMaxChars )
+            {
+                out << wxS( "\n[TRUNCATED: schematic context exceeded size limit]\n" );
+                return out;
+            }
+        }
+
+        if( componentCount == 0 )
+            out << wxS( "(no components)\n" );
+
+        out << wxS( "\n" );
+    }
+
+    out << wxS( "=== NETS (from pin connections) ===\n" );
+    for( const auto& kv : netToNodes )
+    {
+        const wxString& netName = kv.first;
+        const std::vector<wxString>& nodes = kv.second;
+
+        out << wxS( "* " ) << netName << wxS( ": " );
+        for( size_t i = 0; i < nodes.size(); i++ )
+        {
+            out << nodes[i];
+            if( i + 1 < nodes.size() )
+                out << wxS( ", " );
+        }
+        out << wxS( "\n" );
+
+        if( aMaxChars > 0 && (size_t) out.length() > aMaxChars )
+        {
+            out << wxS( "\n[TRUNCATED: schematic context exceeded size limit]\n" );
+            return out;
+        }
+    }
+
+    return out;
 }
 
 
