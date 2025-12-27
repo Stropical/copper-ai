@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToolCallComponent, ToolCall } from "@/components/tool-call"
 import { Send, User, Bot, Sparkles, Check, X } from "lucide-react"
+import { Streamdown } from "streamdown"
 
 interface Message {
   id: string
@@ -16,13 +17,21 @@ interface Message {
   content: string
   timestamp: Date
   toolCalls?: ToolCall[]
+  todos?: { id: string; task: string; status: "pending" | "completed" | "cancelled" | "in_progress" }[]
 }
 
 const MODELS = [
   { value: "google/gemma-3-27b-it:free", label: "Gemma 3 27B IT (Google)" },
+  { value: "openai/gpt-oss-120b:free", label: "GPT-OSS 120B (OpenAI)" },
+  { value: "qwen/qwen3-coder:free", label: "Qwen3 Coder (Qwen)"},
+  { value: "meta-llama/llama-3.1-405b-instruct:free", label: "Llama 3.1 405B Instruct (Meta)"}
 ]
 
 const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001/api/generate"
+const AGENT_BASE_URL = AGENT_API_URL.replace(/\/api\/generate\/?$/, "")
+
+// Serial tool mode: execute one tool call at a time, then let the model continue.
+const SERIAL_TOOL_MODE = true
 
 export function ChatWindow() {
   const [messages, setMessages] = React.useState<Message[]>([
@@ -38,8 +47,13 @@ export function ChatWindow() {
   const [queuedPrompt, setQueuedPrompt] = React.useState<string | null>(null)
   const [selectedModel, setSelectedModel] = React.useState("google/gemma-3-4b")
   const [sessionId] = React.useState(() => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
+  const [authRequired, setAuthRequired] = React.useState<{
+    loginUrl?: string
+    tokenPageUrl?: string
+  } | null>(null)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const queuedPromptRef = React.useRef<string | null>(null)
+  const queuedAutoPromptRef = React.useRef<string | null>(null)
   const rpcWaitersRef = React.useRef(new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>())
   const rpcIdRef = React.useRef(0)
   const abortControllerRef = React.useRef<AbortController | null>(null)
@@ -155,6 +169,7 @@ export function ChatWindow() {
 
   const tryGetSchematicContext = async (): Promise<string> => {
     try {
+      // Keep full context available to the Python agent; we'll control log verbosity there.
       const resp = await sendRpcCommand("GET_SCHEMATIC_CONTEXT", { max_chars: 50000 })
       if (resp?.status === "OK" && typeof resp.data === "string" && resp.data.trim()) {
         return resp.data
@@ -165,7 +180,13 @@ export function ChatWindow() {
     }
   }
 
-  const runToolCallNow = async (messageId: string, toolCallId: string, toolName: string, payload: any) => {
+  const runToolCallNow = async (
+    messageId: string,
+    toolCallId: string,
+    toolName: string,
+    payload: any,
+    opts?: { chainAllTools?: boolean }
+  ) => {
     // Mark running
     setMessages((prev) =>
       prev.map((msg) => {
@@ -181,6 +202,32 @@ export function ChatWindow() {
       const resp = await sendRpcCommand("RUN_TOOL", { tool_name: toolName, payload })
       const ok = resp?.status === "OK"
 
+      const isReadOnlyTool = toolName === "schematic.search_symbol" || toolName === "schematic.get_datasheet"
+
+      // If this was a datasheet query, ingest it into pcb_agent's RAG DB automatically.
+      let datasheetIngestNote: string | null = null
+      if (ok && toolName === "schematic.get_datasheet" && typeof resp?.data === "string" && resp.data.trim()) {
+        try {
+          const ingestResp = await fetch(`${AGENT_BASE_URL}/api/datasheet/ingest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              kicad_datasheet: resp.data,
+              session_id: sessionId,
+              source: "kicad_tool_schematic.get_datasheet",
+            }),
+          }).then((r) => r.json())
+
+          if (ingestResp?.success && ingestResp?.document_id) {
+            datasheetIngestNote = `RAG: stored datasheet doc_id=${ingestResp.document_id} (ref=${ingestResp.reference || "?"})`
+          } else {
+            datasheetIngestNote = `RAG: ingest failed (${ingestResp?.error || "unknown error"})`
+          }
+        } catch (e: any) {
+          datasheetIngestNote = `RAG: ingest failed (${e?.message || "network error"})`
+        }
+      }
+
       // After execution, keep it as "pending" until the user explicitly Accepts.
       setMessages((prev) =>
         prev.map((msg) => {
@@ -189,14 +236,42 @@ export function ChatWindow() {
             tc.id === toolCallId
               ? {
                   ...tc,
-                  status: ok ? ("pending" as const) : ("rejected" as const),
-                  result: ok ? "Applied (awaiting accept)" : (resp?.error_message || "Execution failed"),
+                  status: ok ? (isReadOnlyTool ? ("accepted" as const) : ("pending" as const)) : ("rejected" as const),
+                  result: ok
+                    ? (datasheetIngestNote ? `${resp?.data || ""}\n\n${datasheetIngestNote}` : resp?.data || "Applied (awaiting accept)")
+                    : (resp?.error_message || "Execution failed"),
                 }
               : tc
           )
           return { ...msg, toolCalls: updatedToolCalls }
         })
       )
+
+      // Agentic auto-continue: after tool calls (read-only or serial mode), feed results back to the model.
+      const shouldChain =
+        ok &&
+        typeof resp?.data === "string" &&
+        resp.data.trim() &&
+        (isReadOnlyTool || opts?.chainAllTools)
+
+      if (shouldChain) {
+        const continuation = [
+          "TOOL_RESULT",
+          `tool_name: ${toolName}`,
+          "data:",
+          resp.data,
+          "",
+          "Continue the original task. Use this tool result and proceed to the next step.",
+        ].join("\n")
+
+        if (isLoading) {
+          // Prefer continuing the agentic chain before any user-typed queued prompt.
+          queuedAutoPromptRef.current = continuation
+        } else {
+          // Fire-and-forget to keep UI responsive.
+          setTimeout(() => void sendPrompt(continuation), 0)
+        }
+      }
     } catch (e: any) {
       setMessages((prev) =>
         prev.map((msg) => {
@@ -553,6 +628,7 @@ export function ChatWindow() {
     setIsLoading(true)
 
     try {
+      setAuthRequired(null)
       const abortController = new AbortController()
       abortControllerRef.current = abortController
 
@@ -623,6 +699,14 @@ export function ChatWindow() {
             const data = JSON.parse(trimmed)
             const responseText = data.response || ""
 
+            // If the agent signals auth is required, show a login banner/button.
+            if (data.auth_required) {
+              setAuthRequired({
+                loginUrl: data.login_url,
+                tokenPageUrl: data.token_page_url,
+              })
+            }
+
             if (responseText) {
               accumulatedText += responseText
 
@@ -678,20 +762,29 @@ export function ChatWindow() {
 
               if (toolCalls.length > 0) {
                 console.info("Tool calls detected:", toolCalls)
+                const toolCallsToShow = SERIAL_TOOL_MODE ? toolCalls.slice(0, 1) : toolCalls
+
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessageId
                       ? {
                           ...msg,
-                          toolCalls: toolCalls,
+                          toolCalls: toolCallsToShow,
                         }
                       : msg
                   )
                 )
 
-                // Auto-run tool calls immediately as they arrive.
-                for (const tc of toolCalls) {
-                  await runToolCallNow(assistantMessageId, tc.id, tc.name, tc.arguments)
+                // Auto-run tool calls immediately as they arrive, but in serial mode only the first one.
+                const firstTc = toolCallsToShow[0]
+                await runToolCallNow(assistantMessageId, firstTc.id, firstTc.name, firstTc.arguments, {
+                  chainAllTools: SERIAL_TOOL_MODE,
+                })
+
+                if (toolCalls.length > 1 && SERIAL_TOOL_MODE) {
+                  console.info(
+                    "Serial tool mode enabled: remaining tool calls will be planned/executed after the model continues."
+                  )
                 }
               }
 
@@ -739,12 +832,18 @@ export function ChatWindow() {
       setIsLoading(false)
 
       // Auto-send queued prompt (if you typed ahead while streaming)
-      const next = queuedPromptRef.current
-      if (next && next.trim()) {
-        queuedPromptRef.current = null
-        setQueuedPrompt(null)
-        // Fire-and-forget; avoid blocking UI
-        setTimeout(() => void sendPrompt(next), 0)
+      const autoNext = queuedAutoPromptRef.current
+      if (autoNext && autoNext.trim()) {
+        queuedAutoPromptRef.current = null
+        setTimeout(() => void sendPrompt(autoNext), 0)
+      } else {
+        const next = queuedPromptRef.current
+        if (next && next.trim()) {
+          queuedPromptRef.current = null
+          setQueuedPrompt(null)
+          // Fire-and-forget; avoid blocking UI
+          setTimeout(() => void sendPrompt(next), 0)
+        }
       }
     }
   }
@@ -841,9 +940,31 @@ export function ChatWindow() {
                         : "bg-[#151A21] border border-[#2C333D] text-[#E7E9EC]"
                     }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                    <Streamdown
+                      mode={
+                        message.role === "assistant" &&
+                        isLoading &&
+                        messages[messages.length - 1]?.id === message.id
+                          ? "streaming"
+                          : "static"
+                      }
+                      className="text-[13px] leading-relaxed break-words [&_p]:my-1 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_code]:break-words"
+                      components={{
+                        a: ({ href, children, ...props }) => (
+                          <a
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline underline-offset-2"
+                            {...props}
+                          >
+                            {children}
+                          </a>
+                        ),
+                      }}
+                    >
                       {message.content}
-                    </p>
+                    </Streamdown>
                   </div>
                   {message.role === "user" && (
                     <Avatar className="h-6 w-6 shrink-0 border border-[#2C333D]">
@@ -879,6 +1000,31 @@ export function ChatWindow() {
 
       {/* Input Area - Minimal */}
       <div className="border-t border-[#22272F] bg-[#0F1115] p-3 space-y-2">
+        {authRequired && (
+          <div className="flex items-center justify-between gap-2 rounded-md border border-[#2C333D] bg-[#151A21] px-3 py-2">
+            <div className="text-xs text-[#E7E9EC]">
+              Authentication required. Open the portal token page and click <span className="font-semibold">“Send token to KiCad agent”</span>.
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-3 text-xs border-[#2C333D] bg-[#151A21] text-[#E7E9EC] hover:bg-[#1C222B]"
+                onClick={() => {
+                  const url = authRequired.tokenPageUrl || authRequired.loginUrl
+                  if (!url) return
+                  try {
+                    window.open(url, "_blank", "noopener,noreferrer")
+                  } catch {
+                    // ignore
+                  }
+                }}
+              >
+                Login
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="flex gap-2">
           <Input
             value={input}
@@ -886,7 +1032,7 @@ export function ChatWindow() {
             onKeyPress={handleKeyPress}
             placeholder="Ask me anything..."
             disabled={false}
-            className="flex-1 border-[#2C333D] bg-[#151A21] text-[#E7E9EC] placeholder:text-[#9AA3AD] focus:border-[#C7773A] focus:ring-[#C7773A]/40 h-9 text-sm"
+            className="flex-1 border-[#2C333D] bg-[#151A21] text-[#E7E9EC] placeholder:text-[#9AA3AD] focus:border-[#C7773A] focus:ring-[#C7773A]/40 h-9 text-[13px]"
           />
           {isLoading && (
             <Button

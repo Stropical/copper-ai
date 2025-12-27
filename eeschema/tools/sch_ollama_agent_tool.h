@@ -105,14 +105,30 @@ public:
      */
     bool RunToolCommand( const wxString& aToolName, const wxString& aPayload );
     wxString GetLastToolError() const { return m_lastToolError; }
+    wxString GetLastToolResult() const { return m_lastToolResult; }
 
 private:
+    /**
+     * Finds a symbol by its reference (e.g. "U1"), or if not found, its value (e.g. "MCP2551")
+     * or symbol name (e.g. "Device:R").
+     * @return the symbol and the sheet path it was found on.
+     */
+    struct SYMBOL_MATCH
+    {
+        SCH_SYMBOL*     symbol = nullptr;
+        SCH_SHEET_PATH  sheet;
+    };
+
+    SYMBOL_MATCH findSymbolByRefOrValue( const wxString& aIdentifier, bool aCurrentSheetOnly = false );
+
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
     bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
     bool HandleMoveComponentTool( const nlohmann::json& aPayload );
     bool HandleAddWireTool( const nlohmann::json& aPayload );
     bool HandleAddNetLabelTool( const nlohmann::json& aPayload );
     bool HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
+    bool HandleGetDatasheetTool( const nlohmann::json& aPayload );
+    bool HandleSearchSymbolTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
@@ -120,6 +136,7 @@ private:
     wxString m_model;  // Default model name
     SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
     wxString m_lastToolError;
+    wxString m_lastToolResult;
 };
 
 #endif // SCH_OLLAMA_AGENT_TOOL_H

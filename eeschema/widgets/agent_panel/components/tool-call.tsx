@@ -25,6 +25,7 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
   const isRunning = toolCall.status === "running"
   const isAccepted = toolCall.status === "accepted"
   const isRejected = toolCall.status === "rejected"
+  const isReadOnly = toolCall.name === "schematic.search_symbol" || toolCall.name === "schematic.get_datasheet"
 
   // Extract a compact summary of arguments
   let argsSummary = ""
@@ -50,40 +51,52 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
 
   return (
     <div className={cn(
-      "flex items-center gap-2 px-2 py-1 rounded border text-xs transition-all",
+      "flex flex-col gap-1 px-2 py-1 rounded border text-xs transition-all",
       "border-[#2C333D] bg-[#151A21] text-[#E7E9EC]",
       isAccepted && "border-[#C7773A]/50 bg-[#C7773A]/10",
       isRejected && "border-red-500/30 bg-red-500/5"
     )}>
-      {/* Status indicator */}
-      <div className="shrink-0">
-        {isPending && <span className="text-[#9AA3AD]">○</span>}
-        {isRunning && <Loader2 className="h-3 w-3 animate-spin text-[#C7773A]" />}
-        {isAccepted && <Check className="h-3 w-3 text-[#C7773A]" />}
-        {isRejected && <X className="h-3 w-3 text-red-500/70" />}
-      </div>
+      <div className="flex items-center gap-2">
+        {/* Status indicator */}
+        <div className="shrink-0">
+          {isPending && <span className="text-[#9AA3AD]">○</span>}
+          {isRunning && <Loader2 className="h-3 w-3 animate-spin text-[#C7773A]" />}
+          {isAccepted && <Check className="h-3 w-3 text-[#C7773A]" />}
+          {isRejected && <X className="h-3 w-3 text-red-500/70" />}
+        </div>
 
-      {/* Tool name and args */}
-      <div className="flex-1 min-w-0">
-        <span className="font-mono text-[#E7E9EC]">{toolCall.name}</span>
-        {argsSummary && (
-          <span className="text-[#9AA3AD] ml-2">{argsSummary}</span>
-        )}
-      </div>
+        {/* Tool name and args */}
+        <div className="flex-1 min-w-0">
+          <span className="font-mono text-[#E7E9EC]">{toolCall.name}</span>
+          {argsSummary && (
+            <span className="text-[#9AA3AD] ml-2">{argsSummary}</span>
+          )}
+        </div>
 
-      {/* Action buttons - only show for pending or accepted */}
-      {(isPending || isAccepted) && (
-        <div className="flex gap-1 shrink-0">
-          {isPending && (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onAccept(toolCall.id)}
-                className="h-5 w-5 p-0 hover:bg-[#C7773A]/20"
-              >
-                <Check className="h-3 w-3 text-[#C7773A]" />
-              </Button>
+      {/* Action buttons - only show for pending or accepted (skip read-only tools) */}
+      {!isReadOnly && (isPending || isAccepted) && (
+          <div className="flex gap-1 shrink-0">
+            {isPending && (
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onAccept(toolCall.id)}
+                  className="h-5 w-5 p-0 hover:bg-[#C7773A]/20"
+                >
+                  <Check className="h-3 w-3 text-[#C7773A]" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onUndo(toolCall.id)}
+                  className="h-5 w-5 p-0 hover:bg-red-500/20"
+                >
+                  <X className="h-3 w-3 text-red-500/70" />
+                </Button>
+              </>
+            )}
+            {isAccepted && (
               <Button
                 size="sm"
                 variant="ghost"
@@ -92,18 +105,15 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
               >
                 <X className="h-3 w-3 text-red-500/70" />
               </Button>
-            </>
-          )}
-          {isAccepted && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onUndo(toolCall.id)}
-              className="h-5 w-5 p-0 hover:bg-red-500/20"
-            >
-              <X className="h-3 w-3 text-red-500/70" />
-            </Button>
-          )}
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Result (for query-style tools like get_datasheet) */}
+      {toolCall.result && typeof toolCall.result === "string" && toolCall.result.trim() && (
+        <div className="text-[#9AA3AD] font-mono text-[11px] whitespace-pre-wrap break-words">
+          {toolCall.result}
         </div>
       )}
     </div>

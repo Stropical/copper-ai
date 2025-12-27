@@ -37,6 +37,8 @@
 #include <sch_connection.h>
 #include <stroke_params.h>
 #include <math/box2.h>
+#include <project_sch.h>
+#include <libraries/symbol_library_adapter.h>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <map>
@@ -175,6 +177,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
     std::vector<SCH_JUNCTION*> junctions;
     std::vector<SCH_LINE*> wires;
     std::vector<SCH_LABEL*> labels;
+    std::vector<SCH_GLOBALLABEL*> globalLabels;
     std::vector<SCH_TEXT*> texts;
 
     for( SCH_ITEM* item : screen->Items() )
@@ -196,6 +199,9 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         }
         case SCH_LABEL_T:
             labels.push_back( static_cast<SCH_LABEL*>( item ) );
+            break;
+        case SCH_GLOBAL_LABEL_T:
+            globalLabels.push_back( static_cast<SCH_GLOBALLABEL*>( item ) );
             break;
         case SCH_TEXT_T:
             texts.push_back( static_cast<SCH_TEXT*>( item ) );
@@ -375,6 +381,36 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         content << wxS( "\n" );
     }
 
+    // Format global labels
+    if( !globalLabels.empty() )
+    {
+        content << wxS( "Global Labels:\n" );
+        for( SCH_GLOBALLABEL* label : globalLabels )
+        {
+            VECTOR2I pos = label->GetPosition();
+            double x_mm = schIUScale.IUTomm( pos.x );
+            double y_mm = schIUScale.IUTomm( pos.y );
+            wxString labelText = label->GetText();
+
+            wxString netName = wxS( "" );
+            if( SCH_CONNECTION* conn = label->Connection( &sheet ) )
+                netName = conn->Name();
+
+            if( !netName.IsEmpty() && netName != labelText )
+            {
+                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ),
+                                             labelText, x_mm, y_mm, netName );
+            }
+            else
+            {
+                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm\n" ),
+                                             labelText, x_mm, y_mm );
+            }
+        }
+
+        content << wxS( "\n" );
+    }
+
     // Format text
     if( !texts.empty() )
     {
@@ -391,7 +427,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         content << wxS( "\n" );
     }
 
-    if( symbols.empty() && junctions.empty() && wires.empty() && labels.empty() && texts.empty() )
+    if( symbols.empty() && junctions.empty() && wires.empty() && labels.empty() && globalLabels.empty() && texts.empty() )
     {
         content << wxS( "  (Schematic is empty)\n" );
     }
@@ -410,6 +446,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
 
     wxString out;
     out << wxS( "KICAD_SCHEMATIC_CONTEXT (all sheets)\n" );
+    out << wxS( "Coordinate system: mm. +X is right. +Y is down. Values are schematic sheet coordinates.\n" );
     out << wxS( "Current sheet: " ) << m_frame->GetFullScreenDesc() << wxS( "\n" );
     out << wxS( "Sheet count: " ) << wxString::Format( wxS( "%d" ), (int) sheets.size() ) << wxS( "\n\n" );
 
@@ -439,6 +476,12 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
 
             wxString ref = symbol->GetRef( &sheetPath, true );
             wxString libId = symbol->GetLibId().Format();
+            VECTOR2I symPos = symbol->GetPosition();
+            double sx = schIUScale.IUTomm( symPos.x );
+            double sy = schIUScale.IUTomm( symPos.y );
+            int orientProp = static_cast<int>( symbol->GetOrientationProp() ); // 0/90/180/270
+            bool mirrorX = symbol->GetMirrorX();
+            bool mirrorY = symbol->GetMirrorY();
 
             wxString value;
             wxString footprint;
@@ -469,7 +512,15 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
                 out << wxS( " footprint=" ) << footprint;
             if( !datasheet.IsEmpty() )
                 out << wxS( " datasheet=" ) << datasheet;
-            out << wxS( "\n" );
+            BOX2I bbox = symbol->GetBoundingBox();
+            double bxmin = schIUScale.IUTomm( bbox.GetX() );
+            double bymin = schIUScale.IUTomm( bbox.GetY() );
+            double bxmax = schIUScale.IUTomm( bbox.GetRight() );
+            double bymax = schIUScale.IUTomm( bbox.GetBottom() );
+
+            out << wxString::Format( wxS( " pos=(%.2f, %.2f) rot=%d mirrorX=%d mirrorY=%d bbox=(%.2f, %.2f, %.2f, %.2f)\n" ),
+                                     sx, sy, orientProp, mirrorX ? 1 : 0, mirrorY ? 1 : 0,
+                                     bxmin, bymin, bxmax, bymax );
 
             std::vector<SCH_PIN*> pins = symbol->GetPins( &sheetPath );
             for( SCH_PIN* pin : pins )
@@ -479,6 +530,20 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
 
                 wxString pinNumber = pin->GetShownNumber();
                 wxString pinName = pin->GetShownName();
+                VECTOR2I pinPos = pin->GetPosition();
+                double px = schIUScale.IUTomm( pinPos.x );
+                double py = schIUScale.IUTomm( pinPos.y );
+
+                wxString pinOrient = wxS( "UNKNOWN" );
+                switch( pin->GetOrientation() )
+                {
+                default:
+                    break;
+                case PIN_ORIENTATION::PIN_RIGHT: pinOrient = wxS( "RIGHT" ); break;
+                case PIN_ORIENTATION::PIN_LEFT:  pinOrient = wxS( "LEFT" ); break;
+                case PIN_ORIENTATION::PIN_UP:    pinOrient = wxS( "UP" ); break;
+                case PIN_ORIENTATION::PIN_DOWN:  pinOrient = wxS( "DOWN" ); break;
+                }
 
                 wxString netName = wxS( "<unconnected>" );
                 if( SCH_CONNECTION* conn = pin->Connection( &sheetPath ) )
@@ -491,6 +556,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
                 wxString node = ref + wxS( ":" ) + pinNumber;
                 if( !pinName.IsEmpty() )
                     node << wxS( "(" ) << pinName << wxS( ")" );
+                node << wxString::Format( wxS( "@(%.2f,%.2f,%s)" ), px, py, pinOrient );
 
                 netToNodes[netName].push_back( node );
             }
@@ -701,6 +767,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload )
 {
     m_lastToolError.clear();
+    m_lastToolResult.clear();
 
     if( aToolName.CmpNoCase( wxS( "mock.selection_inspector" ) ) == 0 )
     {
@@ -773,6 +840,38 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
     }
 
+    if( aToolName.CmpNoCase( wxS( "schematic.get_datasheet" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleGetDatasheetTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError = wxString::Format( _( "get_datasheet payload parse error: %s" ),
+                                                wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.search_symbol" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleSearchSymbolTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError = wxString::Format( _( "search_symbol payload parse error: %s" ),
+                                                wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
     if( aToolName.CmpNoCase( wxS( "schematic.add_wire" ) ) == 0 )
     {
         try
@@ -791,6 +890,236 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
     wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), aToolName.wx_str() );
     m_lastToolError = wxString::Format( _( "Unknown tool requested: %s" ), aToolName );
     return false;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleGetDatasheetTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    if( !aPayload.contains( "reference" ) || !aPayload["reference"].is_string() )
+    {
+        m_lastToolError = _( "get_datasheet requires \"reference\" (string), e.g. {\"reference\":\"U7\"}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString reference = wxString::FromUTF8( aPayload["reference"].get<std::string>() );
+    reference.Trim( true ).Trim( false );
+
+    if( reference.IsEmpty() )
+    {
+        m_lastToolError = _( "get_datasheet requires a non-empty reference." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    SYMBOL_MATCH match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL* found = match.symbol;
+    SCH_SHEET_PATH foundSheet = match.sheet;
+
+    if( !found )
+    {
+        m_lastToolError = wxString::Format( _( "get_datasheet: component \"%s\" not found." ), reference );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString value;
+    wxString footprint;
+    wxString datasheet;
+
+    if( SCH_FIELD* f = found->GetField( FIELD_T::VALUE ) )
+        value = f->GetText();
+    if( SCH_FIELD* f = found->GetField( FIELD_T::FOOTPRINT ) )
+        footprint = f->GetText();
+    if( SCH_FIELD* f = found->GetField( FIELD_T::DATASHEET ) )
+        datasheet = f->GetText();
+
+    json out = json::object();
+    out["reference"] = reference.ToStdString();
+    out["value"] = value.ToStdString();
+    out["footprint"] = footprint.ToStdString();
+    out["datasheet"] = datasheet.ToStdString();
+    out["sheet_path"] = foundSheet.PathHumanReadable( false, true ).ToStdString();
+
+    m_lastToolResult = wxString::FromUTF8( out.dump( 2 ) );
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    wxString query;
+    if( aPayload.contains( "query" ) && aPayload["query"].is_string() )
+        query = wxString::FromUTF8( aPayload["query"].get<std::string>() );
+
+    query.Trim( true ).Trim( false );
+
+    int limit = 10;
+    if( aPayload.contains( "limit" ) && aPayload["limit"].is_number_integer() )
+        limit = std::max( 1, std::min( 50, aPayload["limit"].get<int>() ) );
+
+    if( query.IsEmpty() )
+    {
+        m_lastToolError = _( "search_symbol requires \"query\" (string)." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
+    if( !adapter )
+    {
+        m_lastToolError = _( "search_symbol: symbol library adapter not available." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    auto normalize = [&]( const wxString& s ) -> wxString
+    {
+        // Lowercase, strip non-alnum, and normalize numeric runs by stripping leading zeros.
+        wxString in = s.Lower();
+        wxString out;
+        out.reserve( in.length() );
+
+        auto flushNumber = [&]( wxString& num )
+        {
+            if( num.IsEmpty() )
+                return;
+
+            // Strip leading zeros but keep a single zero if the number is all zeros.
+            size_t i = 0;
+            while( i + 1 < num.length() && num[i] == '0' )
+                i++;
+            out << num.Mid( i );
+            num.Clear();
+        };
+
+        wxString num;
+        for( size_t i = 0; i < in.length(); i++ )
+        {
+            const wxChar c = in[i];
+            if( wxIsdigit( c ) )
+            {
+                num << c;
+                continue;
+            }
+
+            flushNumber( num );
+
+            if( wxIsalnum( c ) )
+                out << c;
+        }
+
+        flushNumber( num );
+        return out;
+    };
+
+    wxString qLower = query.Lower();
+    wxString qAfterColon;
+    if( query.Contains( wxS( ":" ) ) )
+        qAfterColon = query.AfterFirst( ':' ).Trim();
+
+    wxString qNorm = normalize( query );
+    wxString qAfterNorm;
+    if( !qAfterColon.IsEmpty() )
+        qAfterNorm = normalize( qAfterColon );
+
+    struct MATCH
+    {
+        int score = 0;
+        wxString lib;
+        wxString name;
+    };
+
+    std::vector<MATCH> matches;
+
+    // Enumerate libraries and symbol names (can be expensive; keep limit small).
+    std::vector<wxString> libs = adapter->GetLibraryNames();
+    for( const wxString& lib : libs )
+    {
+        // Load if needed so enumeration works.
+        adapter->LoadOne( lib );
+
+        std::vector<wxString> names = adapter->GetSymbolNames( lib );
+        for( const wxString& name : names )
+        {
+            wxString nLower = name.Lower();
+            wxString nNorm = normalize( name );
+
+            auto scoreAgainst = [&]( const wxString& q, const wxString& qn ) -> int
+            {
+                if( q.IsEmpty() && qn.IsEmpty() )
+                    return 0;
+
+                int s = 0;
+
+                if( !q.IsEmpty() )
+                {
+                    if( nLower == q )
+                        s = std::max( s, 1000 );
+                    else if( nLower.StartsWith( q ) )
+                        s = std::max( s, 900 );
+                    else if( nLower.Find( q ) != wxNOT_FOUND )
+                        s = std::max( s, 700 );
+                }
+
+                if( !qn.IsEmpty() )
+                {
+                    if( nNorm == qn )
+                        s = std::max( s, 980 );
+                    else if( nNorm.StartsWith( qn ) )
+                        s = std::max( s, 880 );
+                    else if( nNorm.Find( qn ) != wxNOT_FOUND )
+                        s = std::max( s, 680 );
+                }
+
+                return s;
+            };
+
+            int score = 0;
+            score = std::max( score, scoreAgainst( qLower, qNorm ) );
+            score = std::max( score, scoreAgainst( qAfterColon.Lower(), qAfterNorm ) );
+
+            if( score > 0 )
+                matches.push_back( MATCH{ score, lib, name } );
+        }
+    }
+
+    std::sort( matches.begin(), matches.end(),
+               []( const MATCH& a, const MATCH& b )
+               {
+                   if( a.score != b.score )
+                       return a.score > b.score;
+                   if( a.lib != b.lib )
+                       return a.lib < b.lib;
+                   return a.name < b.name;
+               } );
+
+    if( (int) matches.size() > limit )
+        matches.resize( limit );
+
+    json out = json::object();
+    out["query"] = query.ToStdString();
+    out["count"] = (int) matches.size();
+    out["matches"] = json::array();
+
+    for( const MATCH& m : matches )
+    {
+        json row = json::object();
+        row["library"] = m.lib.ToStdString();
+        row["name"] = m.name.ToStdString();
+        row["lib_id"] = ( m.lib + wxS( ":" ) + m.name ).ToStdString();
+        row["score"] = m.score;
+        out["matches"].push_back( row );
+    }
+
+    m_lastToolResult = wxString::FromUTF8( out.dump( 2 ) );
+    return true;
 }
 
 
@@ -819,6 +1148,40 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     wxString symbolId = *symbolIdOpt;
     symbolId.Trim( true ).Trim( false );
 
+    // Allow passing a part number (e.g. "MCP2551") without the "LibNick:SymbolName" prefix.
+    // If no lib nickname is provided, use schematic.search_symbol to resolve the best match.
+    if( !symbolId.Contains( wxS( ":" ) ) )
+    {
+        try
+        {
+            json q = json::object();
+            q["query"] = symbolId.ToStdString();
+            q["limit"] = 10;
+
+            if( HandleSearchSymbolTool( q ) && !m_lastToolResult.IsEmpty() )
+            {
+                json r = json::parse( m_lastToolResult.ToStdString() );
+                if( r.contains( "matches" ) && r["matches"].is_array() && !r["matches"].empty()
+                    && r["matches"][0].is_object() && r["matches"][0].contains( "lib_id" )
+                    && r["matches"][0]["lib_id"].is_string() )
+                {
+                    wxString resolved = wxString::FromUTF8( r["matches"][0]["lib_id"].get<std::string>() );
+                    resolved.Trim( true ).Trim( false );
+                    if( !resolved.IsEmpty() && resolved.Contains( wxS( ":" ) ) )
+                    {
+                        wxLogMessage( wxS( "[OllamaAgent] Resolved symbol \"%s\" -> \"%s\"" ),
+                                      symbolId.wx_str(), resolved.wx_str() );
+                        symbolId = resolved;
+                    }
+                }
+            }
+        }
+        catch( ... )
+        {
+            // Fall back to parse error below if we couldn't resolve.
+        }
+    }
+
     LIB_ID libId;
     UTF8 utfSymbol( symbolId.ToStdString().c_str() );
 
@@ -834,8 +1197,34 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 
     if( !libSymbol )
     {
+        // Provide actionable suggestions by searching symbol names across loaded libraries.
+        wxString hint;
+        try
+        {
+            json q = json::object();
+            q["query"] = symbolId.ToStdString();
+            q["limit"] = 8;
+            if( HandleSearchSymbolTool( q ) && !m_lastToolResult.IsEmpty() )
+                hint = wxS( "\nSuggestions (use the exact lib_id):\n" ) + m_lastToolResult;
+
+            // If the user/model provided "LibNick:SymbolName" but the lib nickname is wrong,
+            // also try searching by just the symbol name portion.
+            if( hint.IsEmpty() && symbolId.Contains( wxS( ":" ) ) )
+            {
+                json q2 = json::object();
+                q2["query"] = symbolId.AfterFirst( ':' ).ToStdString();
+                q2["limit"] = 8;
+                if( HandleSearchSymbolTool( q2 ) && !m_lastToolResult.IsEmpty() )
+                    hint = wxS( "\nSuggestions (use the exact lib_id):\n" ) + m_lastToolResult;
+            }
+        }
+        catch( ... )
+        {
+        }
+
         m_lastToolError = wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ),
-                                            symbolId );
+                                            symbolId )
+                          + hint;
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
@@ -861,6 +1250,21 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     std::optional<wxString> referenceOpt = getString( "reference" );
     if( referenceOpt && !referenceOpt->IsEmpty() )
         newSymbol->SetRef( &sheet, *referenceOpt );
+
+    // Optional: set value/footprint fields for passives, etc.
+    std::optional<wxString> valueOpt = getString( "value" );
+    if( valueOpt && !valueOpt->IsEmpty() )
+    {
+        if( SCH_FIELD* f = newSymbol->GetField( FIELD_T::VALUE ) )
+            f->SetText( *valueOpt );
+    }
+
+    std::optional<wxString> footprintOpt = getString( "footprint" );
+    if( footprintOpt && !footprintOpt->IsEmpty() )
+    {
+        if( SCH_FIELD* f = newSymbol->GetField( FIELD_T::FOOTPRINT ) )
+            f->SetText( *footprintOpt );
+    }
 
     int orientation = 0;
 
@@ -888,6 +1292,12 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     SCH_COMMIT commit( m_frame );
     commit.Added( newSymbol, screen );
     commit.Push( _( "Place component" ) );
+    
+    // Return the assigned reference so the agent can use it for labels/wiring.
+    json res = json::object();
+    res["reference"] = newSymbol->GetRef( &sheet, false ).ToStdString();
+    res["symbol"] = symbolId.ToStdString();
+    m_lastToolResult = wxString::FromUTF8( res.dump( 2 ) );
 
     if( m_frame->GetToolManager() )
     {
@@ -895,6 +1305,91 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     }
 
     return true;
+}
+
+
+SCH_OLLAMA_AGENT_TOOL::SYMBOL_MATCH SCH_OLLAMA_AGENT_TOOL::findSymbolByRefOrValue(
+        const wxString& aIdentifier, bool aCurrentSheetOnly )
+{
+    SYMBOL_MATCH bestMatch;
+    wxString id = aIdentifier;
+    id.Trim( true ).Trim( false );
+
+    if( id.IsEmpty() || !m_frame )
+        return bestMatch;
+
+    SCH_SHEET_LIST hierarchy = m_frame->Schematic().Hierarchy();
+    SCH_SHEET_PATH currentSheet = m_frame->GetCurrentSheet();
+
+    // Strategy 1: Exact Reference Match (e.g. "U1")
+    for( SCH_SHEET_PATH& sheet : hierarchy )
+    {
+        if( aCurrentSheetOnly && sheet != currentSheet )
+            continue;
+
+        SCH_SCREEN* screen = sheet.LastScreen();
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            if( sym->GetRef( &sheet, false ).CmpNoCase( id ) == 0 )
+            {
+                bestMatch.symbol = sym;
+                bestMatch.sheet = sheet;
+                return bestMatch; // Perfect match found
+            }
+        }
+    }
+
+    // Strategy 2: Match by Value (e.g. "MCP2551")
+    for( SCH_SHEET_PATH& sheet : hierarchy )
+    {
+        if( aCurrentSheetOnly && sheet != currentSheet )
+            continue;
+
+        SCH_SCREEN* screen = sheet.LastScreen();
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            if( sym->GetValue( false, nullptr, false ).CmpNoCase( id ) == 0 )
+            {
+                bestMatch.symbol = sym;
+                bestMatch.sheet = sheet;
+                return bestMatch;
+            }
+        }
+    }
+
+    // Strategy 3: Match by Symbol Name (e.g. "Device:R" or "R")
+    for( SCH_SHEET_PATH& sheet : hierarchy )
+    {
+        if( aCurrentSheetOnly && sheet != currentSheet )
+            continue;
+
+        SCH_SCREEN* screen = sheet.LastScreen();
+        if( !screen )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
+            wxString libId = sym->GetLibId().Format();
+            wxString itemName = wxString::FromUTF8( sym->GetLibId().GetLibItemName().c_str() );
+            if( libId.CmpNoCase( id ) == 0 || itemName.CmpNoCase( id ) == 0 )
+            {
+                bestMatch.symbol = sym;
+                bestMatch.sheet = sheet;
+                return bestMatch;
+            }
+        }
+    }
+
+    return bestMatch;
 }
 
 
@@ -923,37 +1418,14 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
     wxString reference = *referenceOpt;
     reference.Trim( true ).Trim( false );
 
-    // Find the symbol by reference
-    SCH_SYMBOL* symbol = nullptr;
-    SCH_SHEET_PATH symbolSheet;
-    SCH_SHEET_LIST hierarchy = m_frame->Schematic().Hierarchy();
-
-    for( SCH_SHEET_PATH& sheet : hierarchy )
-    {
-        SCH_SCREEN* screen = sheet.LastScreen();
-        if( !screen )
-            continue;
-
-        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
-        {
-            SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
-            wxString candidateRef = candidate->GetRef( &sheet, false );
-
-            if( candidateRef.CmpNoCase( reference ) == 0 )
-            {
-                symbol = candidate;
-                symbolSheet = sheet;
-                break;
-            }
-        }
-
-        if( symbol )
-            break;
-    }
+    // Find the symbol by reference (or value/symbol name as fallback)
+    SYMBOL_MATCH match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL* symbol = match.symbol;
+    SCH_SHEET_PATH symbolSheet = match.sheet;
 
     if( !symbol )
     {
-        m_lastToolError = wxString::Format( _( "Component with reference \"%s\" not found." ), reference );
+        m_lastToolError = wxString::Format( _( "Component \"%s\" not found." ), reference );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
@@ -1016,13 +1488,19 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         return false;
     }
 
-    SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
-    SCH_SCREEN* screen = sheet.LastScreen();
-    if( !screen )
+    // Default placement target is the current sheet, but pin-mode may redirect to the sheet
+    // where the referenced symbol actually lives (so connect-with-label can place both ends).
+    SCH_SHEET_PATH currentSheet = m_frame->GetCurrentSheet();
+    SCH_SHEET_PATH targetSheet = currentSheet;
+    SCH_SCREEN*    targetScreen = targetSheet.LastScreen();
+    if( !targetScreen )
         return false;
 
     VECTOR2I pos;
     bool havePos = false;
+    bool pinMode = false;
+    VECTOR2I pinPos;
+    SPIN_STYLE spinStyle = SPIN_STYLE::RIGHT;
 
     // Mode A: coordinates (mm)
     if( aPayload.contains( "x" ) && aPayload.contains( "y" ) && aPayload["x"].is_number() && aPayload["y"].is_number() )
@@ -1035,6 +1513,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
     // Mode B: at{reference,pin} — place label one grid step away from the symbol body at that pin.
     if( !havePos && aPayload.contains( "at" ) && aPayload["at"].is_object() )
     {
+        pinMode = true;
         const json& at = aPayload["at"];
         if( !at.contains( "reference" ) || !at.contains( "pin" ) )
         {
@@ -1060,30 +1539,21 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         const int gridStepIU = schIUScale.mmToIU( 2.54 );
         const int obstacleMarginIU = schIUScale.mmToIU( 1.0 );
 
-        SCH_SYMBOL* sym = nullptr;
-        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
-        {
-            SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
-            if( !candidate )
-                continue;
+        // Find the referenced symbol (or value/name) anywhere in the loaded hierarchy.
+        SYMBOL_MATCH match = findSymbolByRefOrValue( ref );
+        SCH_SYMBOL* sym = match.symbol;
+        targetSheet = match.sheet;
+        targetScreen = targetSheet.LastScreen();
 
-            wxString candidateRef = candidate->GetRef( &sheet, false );
-            if( candidateRef.CmpNoCase( ref ) == 0 )
-            {
-                sym = candidate;
-                break;
-            }
-        }
-
-        if( !sym )
+        if( !sym || !targetScreen )
         {
-            m_lastToolError = wxString::Format( _( "add_net_label: reference \"%s\" not found on current sheet." ), ref );
+            m_lastToolError = wxString::Format( _( "add_net_label: component \"%s\" not found in schematic hierarchy." ), ref );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
 
         SCH_PIN* targetPin = nullptr;
-        for( SCH_PIN* p : sym->GetPins( &sheet ) )
+        for( SCH_PIN* p : sym->GetPins( &targetSheet ) )
         {
             if( !p )
                 continue;
@@ -1106,7 +1576,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
             return false;
         }
 
-        const VECTOR2I pinPos = targetPin->GetPosition();
+        pinPos = targetPin->GetPosition();
         BOX2I bbox = sym->GetBoundingBox();
         bbox.Inflate( obstacleMarginIU );
 
@@ -1125,6 +1595,24 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         else
             pos = VECTOR2I( pinPos.x, pinPos.y + gridStepIU );
 
+        // Orient the label so it faces "out" from the pin side.
+        switch( targetPin->GetOrientation() )
+        {
+        default:
+        case PIN_ORIENTATION::PIN_RIGHT:
+            spinStyle = SPIN_STYLE::LEFT;
+            break;
+        case PIN_ORIENTATION::PIN_LEFT:
+            spinStyle = SPIN_STYLE::RIGHT;
+            break;
+        case PIN_ORIENTATION::PIN_UP:
+            spinStyle = SPIN_STYLE::BOTTOM;
+            break;
+        case PIN_ORIENTATION::PIN_DOWN:
+            spinStyle = SPIN_STYLE::UP;
+            break;
+        }
+
         havePos = true;
     }
 
@@ -1140,15 +1628,34 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
     SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pos, net );
     label->SetPosition( pos );
     label->SetText( net );
-    label->SetParent( screen );
+    label->SetParent( targetScreen );
+    label->SetSpinStyle( spinStyle );
 
     SCH_COMMIT commit( m_frame );
-    m_frame->AddToScreen( label, screen );
-    commit.Added( label, screen );
+    // In pin-mode, drop a short wire stub from the pin to the label anchor so it's electrically connected.
+    SCH_LINE* stub = nullptr;
+    if( pinMode && pinPos != pos )
+    {
+        stub = new SCH_LINE();
+        stub->SetStartPoint( pinPos );
+        stub->SetEndPoint( pos );
+        stub->SetLayer( LAYER_WIRE );
+        stub->SetStroke( STROKE_PARAMS() );
+        stub->SetParent( targetScreen );
+        m_frame->AddToScreen( stub, targetScreen );
+        commit.Added( stub, targetScreen );
+    }
+
+    m_frame->AddToScreen( label, targetScreen );
+    commit.Added( label, targetScreen );
     commit.Push( _( "Add global label" ) );
 
     if( m_frame->GetToolManager() )
+    {
+        if( stub )
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
         m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
+    }
 
     if( m_frame->GetCanvas() )
         m_frame->GetCanvas()->Refresh();
@@ -1169,20 +1676,52 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleConnectWithNetLabelTool( const json& aPayload 
         return false;
     }
 
-    if( !aPayload.contains( "from" ) || !aPayload.contains( "to" ) || !aPayload["from"].is_object()
-        || !aPayload["to"].is_object() )
+    auto extractEndpoint = [&]( const json& obj ) -> const json*
     {
-        m_lastToolError = _( "connect_with_net_label requires from{reference,pin} and to{reference,pin}." );
-        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
-        return false;
+        if( !obj.is_object() )
+            return nullptr;
+
+        // direct: {reference,pin}
+        if( obj.contains( "reference" ) && obj.contains( "pin" ) )
+            return &obj;
+
+        // nested: {at:{reference,pin}}
+        if( obj.contains( "at" ) && obj["at"].is_object() && obj["at"].contains( "reference" ) && obj["at"].contains( "pin" ) )
+            return &obj["at"];
+
+        return nullptr;
+    };
+
+    const json* fromEp = nullptr;
+    const json* toEp = nullptr;
+
+    // Common shapes: from/to, a/b, or endpoints:[{..},{..}]
+    if( aPayload.contains( "from" ) )
+        fromEp = extractEndpoint( aPayload["from"] );
+    else if( aPayload.contains( "a" ) )
+        fromEp = extractEndpoint( aPayload["a"] );
+
+    if( aPayload.contains( "to" ) )
+        toEp = extractEndpoint( aPayload["to"] );
+    else if( aPayload.contains( "b" ) )
+        toEp = extractEndpoint( aPayload["b"] );
+
+    if( ( !fromEp || !toEp ) && aPayload.contains( "endpoints" ) && aPayload["endpoints"].is_array()
+        && aPayload["endpoints"].size() >= 2 )
+    {
+        if( !fromEp )
+            fromEp = extractEndpoint( aPayload["endpoints"][0] );
+        if( !toEp )
+            toEp = extractEndpoint( aPayload["endpoints"][1] );
     }
 
-    const json& from = aPayload["from"];
-    const json& to = aPayload["to"];
-
-    if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" ) || !to.contains( "pin" ) )
+    if( !fromEp || !toEp )
     {
-        m_lastToolError = _( "connect_with_net_label requires from{reference,pin} and to{reference,pin}." );
+        m_lastToolError =
+                _( "connect_with_net_label requires endpoints in one of these forms: "
+                   "from{reference,pin}/to{reference,pin}, "
+                   "from{at{reference,pin}}/to{at{reference,pin}}, "
+                   "a/b, or endpoints:[{reference,pin},{reference,pin}]." );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
@@ -1192,14 +1731,14 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleConnectWithNetLabelTool( const json& aPayload 
     json p1 = json::object();
     p1["net"] = net;
     p1["at"] = json::object();
-    p1["at"]["reference"] = from["reference"];
-    p1["at"]["pin"] = from["pin"];
+    p1["at"]["reference"] = (*fromEp)["reference"];
+    p1["at"]["pin"] = (*fromEp)["pin"];
 
     json p2 = json::object();
     p2["net"] = net;
     p2["at"] = json::object();
-    p2["at"]["reference"] = to["reference"];
-    p2["at"]["pin"] = to["pin"];
+    p2["at"]["reference"] = (*toEp)["reference"];
+    p2["at"]["pin"] = (*toEp)["pin"];
 
     bool ok1 = HandleAddNetLabelTool( p1 );
     wxString err1 = m_lastToolError;
@@ -1244,35 +1783,24 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         if( ref.IsEmpty() || pinKey.IsEmpty() )
             return std::nullopt;
 
-        SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
-        SCH_SCREEN* sc = sheet.LastScreen();
-        if( !sc )
+        SYMBOL_MATCH match = findSymbolByRefOrValue( ref, true );
+        SCH_SYMBOL* sym = match.symbol;
+        if( !sym )
             return std::nullopt;
 
-        for( SCH_ITEM* item : sc->Items().OfType( SCH_SYMBOL_T ) )
+        std::vector<SCH_PIN*> pins = sym->GetPins( &match.sheet );
+        for( SCH_PIN* pin : pins )
         {
-            SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
-            if( !sym )
+            if( !pin )
                 continue;
 
-            wxString candidateRef = sym->GetRef( &sheet, false );
-            if( candidateRef.CmpNoCase( ref ) != 0 )
-                continue;
+            wxString name = pin->GetShownName();
+            wxString number = pin->GetShownNumber();
 
-            std::vector<SCH_PIN*> pins = sym->GetPins( &sheet );
-            for( SCH_PIN* pin : pins )
+            if( ( !name.IsEmpty() && name.CmpNoCase( pinKey ) == 0 )
+                || ( !number.IsEmpty() && number.CmpNoCase( pinKey ) == 0 ) )
             {
-                if( !pin )
-                    continue;
-
-                wxString name = pin->GetShownName();
-                wxString number = pin->GetShownNumber();
-
-                if( ( !name.IsEmpty() && name.CmpNoCase( pinKey ) == 0 )
-                    || ( !number.IsEmpty() && number.CmpNoCase( pinKey ) == 0 ) )
-                {
-                    return PIN_LOC{ pin->GetPosition(), sc, sym->GetBoundingBox() };
-                }
+                return PIN_LOC{ pin->GetPosition(), match.sheet.LastScreen(), sym->GetBoundingBox() };
             }
         }
 

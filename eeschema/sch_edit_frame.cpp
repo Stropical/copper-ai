@@ -428,6 +428,12 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                                         if( !err.IsEmpty() )
                                             response["error_message"] = err.ToUTF8().data();
                                     }
+                                    else
+                                    {
+                                        wxString data = tool->GetLastToolResult();
+                                        if( !data.IsEmpty() )
+                                            response["data"] = data.ToUTF8().data();
+                                    }
                                 }
 
                                 response["status"] = ok ? "OK" : "ERROR";
