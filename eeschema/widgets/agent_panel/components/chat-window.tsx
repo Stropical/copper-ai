@@ -19,28 +19,10 @@ interface Message {
 }
 
 const MODELS = [
-  { value: "xiaomi/mimo-v2-flash", label: "MiMo-V2-Flash (Xiaomi)" },
-  { value: "mistralai/devstral-2-2512", label: "Devstral 2 2512 (Mistral)" },
-  { value: "kwaipilot/kat-coder-pro-v1", label: "KAT-Coder-Pro V1 (Kwaipilot)" },
-  { value: "tng/deepseek-r1t2-chimera", label: "DeepSeek R1T2 Chimera (TNG)" },
-  { value: "nvidia/nemotron-3-nano-30b-a3b", label: "Nemotron 3 Nano 30B (NVIDIA)" },
-  { value: "nex-agi/deepseek-v3.1-nex-n1", label: "DeepSeek V3.1 Nex N1 (Nex AGI)" },
-  { value: "tng/deepseek-r1t-chimera", label: "DeepSeek R1T Chimera (TNG)" },
-  { value: "nvidia/nemotron-nano-12b-2-vl", label: "Nemotron Nano 12B 2 VL (NVIDIA)" },
-  { value: "z-ai/glm-4.5-air", label: "GLM 4.5 Air (Z.AI)" },
-  { value: "tng/r1t-chimera", label: "R1T Chimera (TNG)" },
-  { value: "allenai/olmo-3-32b-think", label: "Olmo 3 32B Think (AllenAI)" },
-  { value: "qwen/qwen2.5-vl-7b-instruct", label: "Qwen2.5-VL 7B Instruct (Qwen)" },
-  { value: "meta-llama/llama-3.2-3b-instruct", label: "Llama 3.2 3B Instruct (Meta)" },
-  { value: "qwen/qwen3-4b", label: "Qwen3 4B (Qwen)" },
-  { value: "moonshotai/kimi-k2-0711", label: "Kimi K2 0711 (MoonshotAI)" },
-  { value: "google/gemma-3-12b", label: "Gemma 3 12B (Google)" },
-  { value: "google/gemma-3n-4b", label: "Gemma 3n 4B (Google)" },
-  { value: "google/gemma-3n-2b", label: "Gemma 3n 2B (Google)" },
-  { value: "google/gemma-3-4b", label: "Gemma 3 4B (Google)" },
+  { value: "google/gemma-3-27b-it:free", label: "Gemma 3 27B IT (Google)" },
 ]
 
-const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001/api/pcb/generate"
+const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001/api/generate"
 
 export function ChatWindow() {
   const [messages, setMessages] = React.useState<Message[]>([
@@ -265,9 +247,8 @@ export function ChatWindow() {
 
               // Note: thinking tags are removed from display, but we track them for future use
 
-              // Update message with accumulated text
+              // Update message with accumulated text (but don't show tool calls yet)
               const cleanText = removeThinkingTags(accumulatedText)
-              const toolCalls = parseToolCalls(cleanText)
               const contentWithoutTools = removeToolCalls(cleanText).trim()
 
               setMessages((prev) =>
@@ -276,7 +257,7 @@ export function ChatWindow() {
                     ? {
                         ...msg,
                         content: contentWithoutTools || "Processing...",
-                        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+                        // Don't set toolCalls during streaming - only at the end
                       }
                     : msg
                 )
@@ -284,6 +265,22 @@ export function ChatWindow() {
             }
 
             if (data.done) {
+              // Parse and add tool calls only at the end
+              const cleanText = removeThinkingTags(accumulatedText)
+              const toolCalls = parseToolCalls(cleanText)
+              
+              if (toolCalls.length > 0) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessageId
+                      ? {
+                          ...msg,
+                          toolCalls: toolCalls,
+                        }
+                      : msg
+                  )
+                )
+              }
               break
             }
           } catch (e) {
@@ -390,9 +387,9 @@ export function ChatWindow() {
                   )}
                 </div>
 
-                {/* Tool Calls */}
+                {/* Tool Calls - Compact display */}
                 {message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="ml-9 space-y-1">
+                  <div className="ml-9 space-y-0.5">
                     {message.toolCalls.map((toolCall) => (
                       <ToolCallComponent
                         key={toolCall.id}
