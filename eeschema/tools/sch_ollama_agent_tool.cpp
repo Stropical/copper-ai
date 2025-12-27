@@ -41,6 +41,7 @@
 #include <set>
 #include <map>
 #include <vector>
+#include <limits>
 
 using json = nlohmann::json;
 #include <sch_commit.h>
@@ -699,6 +700,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 
 bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload )
 {
+    m_lastToolError.clear();
+
     if( aToolName.CmpNoCase( wxS( "mock.selection_inspector" ) ) == 0 )
     {
         wxLogMessage( wxS( "[OllamaAgent] mock tool '%s' invoked with payload: %s" ),
@@ -736,6 +739,40 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
     }
 
+    if( aToolName.CmpNoCase( wxS( "schematic.add_net_label" ) ) == 0
+        || aToolName.CmpNoCase( wxS( "schematic.add_global_label" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleAddNetLabelTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError = wxString::Format( _( "add_net_label payload parse error: %s" ),
+                                                wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.connect_with_net_label" ) ) == 0
+        || aToolName.CmpNoCase( wxS( "schematic.connect_with_global_label" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleConnectWithNetLabelTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError = wxString::Format( _( "connect_with_net_label payload parse error: %s" ),
+                                                wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
     if( aToolName.CmpNoCase( wxS( "schematic.add_wire" ) ) == 0 )
     {
         try
@@ -752,6 +789,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
     }
 
     wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), aToolName.wx_str() );
+    m_lastToolError = wxString::Format( _( "Unknown tool requested: %s" ), aToolName );
     return false;
 }
 
@@ -773,7 +811,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 
     if( !symbolIdOpt || symbolIdOpt->IsEmpty() )
     {
-        DisplayError( m_frame, _( "place_component tool requires a \"symbol\" field such as \"Device:R\"." ) );
+        m_lastToolError = _( "place_component tool requires a \"symbol\" field such as \"Device:R\"." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
@@ -785,9 +824,9 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 
     if( libId.Parse( utfSymbol ) >= 0 || !libId.IsValid() )
     {
-        DisplayError( m_frame,
-                      wxString::Format( _( "Unable to parse library identifier \"%s\". Use libnick:symbol_name." ),
-                                        symbolId ) );
+        m_lastToolError = wxString::Format( _( "Unable to parse library identifier \"%s\". Use libnick:symbol_name." ),
+                                            symbolId );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
@@ -795,9 +834,9 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 
     if( !libSymbol )
     {
-        DisplayError( m_frame,
-                      wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ),
-                                        symbolId ) );
+        m_lastToolError = wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ),
+                                            symbolId );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
@@ -876,7 +915,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
 
     if( !referenceOpt || referenceOpt->IsEmpty() )
     {
-        DisplayError( m_frame, _( "move_component tool requires a \"reference\" field." ) );
+        m_lastToolError = _( "move_component tool requires a \"reference\" field." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
@@ -913,8 +953,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
 
     if( !symbol )
     {
-        DisplayError( m_frame,
-                      wxString::Format( _( "Component with reference \"%s\" not found." ), reference ) );
+        m_lastToolError = wxString::Format( _( "Component with reference \"%s\" not found." ), reference );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
@@ -945,6 +985,242 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
     return true;
 }
 
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    auto asWxString = [&]( const json& v ) -> std::optional<wxString>
+    {
+        if( v.is_string() )
+            return wxString::FromUTF8( v.get<std::string>() );
+        if( v.is_number_integer() )
+            return wxString::Format( wxS( "%lld" ), v.get<long long>() );
+        return std::nullopt;
+    };
+
+    if( !aPayload.contains( "net" ) || !aPayload["net"].is_string() )
+    {
+        m_lastToolError = _( "add_net_label requires \"net\" (string)." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString net = wxString::FromUTF8( aPayload["net"].get<std::string>() );
+    net.Trim( true ).Trim( false );
+    if( net.IsEmpty() )
+    {
+        m_lastToolError = _( "add_net_label requires non-empty \"net\"." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+    SCH_SCREEN* screen = sheet.LastScreen();
+    if( !screen )
+        return false;
+
+    VECTOR2I pos;
+    bool havePos = false;
+
+    // Mode A: coordinates (mm)
+    if( aPayload.contains( "x" ) && aPayload.contains( "y" ) && aPayload["x"].is_number() && aPayload["y"].is_number() )
+    {
+        pos = VECTOR2I( schIUScale.mmToIU( aPayload["x"].get<double>() ),
+                        schIUScale.mmToIU( aPayload["y"].get<double>() ) );
+        havePos = true;
+    }
+
+    // Mode B: at{reference,pin} — place label one grid step away from the symbol body at that pin.
+    if( !havePos && aPayload.contains( "at" ) && aPayload["at"].is_object() )
+    {
+        const json& at = aPayload["at"];
+        if( !at.contains( "reference" ) || !at.contains( "pin" ) )
+        {
+            m_lastToolError = _( "add_net_label pin mode requires at{reference,pin}." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+
+        auto refOpt = asWxString( at["reference"] );
+        auto pinOpt = asWxString( at["pin"] );
+        if( !refOpt || !pinOpt )
+        {
+            m_lastToolError = _( "add_net_label: at.reference must be string, at.pin must be string/int." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+
+        wxString ref = *refOpt;
+        wxString pinKey = *pinOpt;
+        ref.Trim( true ).Trim( false );
+        pinKey.Trim( true ).Trim( false );
+
+        const int gridStepIU = schIUScale.mmToIU( 2.54 );
+        const int obstacleMarginIU = schIUScale.mmToIU( 1.0 );
+
+        SCH_SYMBOL* sym = nullptr;
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* candidate = static_cast<SCH_SYMBOL*>( item );
+            if( !candidate )
+                continue;
+
+            wxString candidateRef = candidate->GetRef( &sheet, false );
+            if( candidateRef.CmpNoCase( ref ) == 0 )
+            {
+                sym = candidate;
+                break;
+            }
+        }
+
+        if( !sym )
+        {
+            m_lastToolError = wxString::Format( _( "add_net_label: reference \"%s\" not found on current sheet." ), ref );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+
+        SCH_PIN* targetPin = nullptr;
+        for( SCH_PIN* p : sym->GetPins( &sheet ) )
+        {
+            if( !p )
+                continue;
+
+            wxString name = p->GetShownName();
+            wxString number = p->GetShownNumber();
+
+            if( ( !name.IsEmpty() && name.CmpNoCase( pinKey ) == 0 )
+                || ( !number.IsEmpty() && number.CmpNoCase( pinKey ) == 0 ) )
+            {
+                targetPin = p;
+                break;
+            }
+        }
+
+        if( !targetPin )
+        {
+            m_lastToolError = wxString::Format( _( "add_net_label: pin \"%s\" not found on %s." ), pinKey, ref );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+
+        const VECTOR2I pinPos = targetPin->GetPosition();
+        BOX2I bbox = sym->GetBoundingBox();
+        bbox.Inflate( obstacleMarginIU );
+
+        const int dl = std::abs( pinPos.x - bbox.GetX() );
+        const int dr = std::abs( bbox.GetRight() - pinPos.x );
+        const int dt = std::abs( pinPos.y - bbox.GetY() );
+        const int db = std::abs( bbox.GetBottom() - pinPos.y );
+        const int best = std::min( std::min( dl, dr ), std::min( dt, db ) );
+
+        if( best == dl )
+            pos = VECTOR2I( pinPos.x - gridStepIU, pinPos.y );
+        else if( best == dr )
+            pos = VECTOR2I( pinPos.x + gridStepIU, pinPos.y );
+        else if( best == dt )
+            pos = VECTOR2I( pinPos.x, pinPos.y - gridStepIU );
+        else
+            pos = VECTOR2I( pinPos.x, pinPos.y + gridStepIU );
+
+        havePos = true;
+    }
+
+    if( !havePos )
+    {
+        m_lastToolError = _( "add_net_label requires either x,y (mm) or at{reference,pin}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // NOTE: This tool creates a GLOBAL label (SCH_GLOBALLABEL), not a local net label,
+    // so it can connect across sheets/hierarchy.
+    SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pos, net );
+    label->SetPosition( pos );
+    label->SetText( net );
+    label->SetParent( screen );
+
+    SCH_COMMIT commit( m_frame );
+    m_frame->AddToScreen( label, screen );
+    commit.Added( label, screen );
+    commit.Push( _( "Add global label" ) );
+
+    if( m_frame->GetToolManager() )
+        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
+
+    if( m_frame->GetCanvas() )
+        m_frame->GetCanvas()->Refresh();
+
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleConnectWithNetLabelTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    if( !aPayload.contains( "net" ) || !aPayload["net"].is_string() )
+    {
+        m_lastToolError = _( "connect_with_net_label requires \"net\" (string)." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    if( !aPayload.contains( "from" ) || !aPayload.contains( "to" ) || !aPayload["from"].is_object()
+        || !aPayload["to"].is_object() )
+    {
+        m_lastToolError = _( "connect_with_net_label requires from{reference,pin} and to{reference,pin}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    const json& from = aPayload["from"];
+    const json& to = aPayload["to"];
+
+    if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" ) || !to.contains( "pin" ) )
+    {
+        m_lastToolError = _( "connect_with_net_label requires from{reference,pin} and to{reference,pin}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Reuse add_net_label implementation twice.
+    const std::string net = aPayload["net"].get<std::string>();
+    json p1 = json::object();
+    p1["net"] = net;
+    p1["at"] = json::object();
+    p1["at"]["reference"] = from["reference"];
+    p1["at"]["pin"] = from["pin"];
+
+    json p2 = json::object();
+    p2["net"] = net;
+    p2["at"] = json::object();
+    p2["at"]["reference"] = to["reference"];
+    p2["at"]["pin"] = to["pin"];
+
+    bool ok1 = HandleAddNetLabelTool( p1 );
+    wxString err1 = m_lastToolError;
+    bool ok2 = HandleAddNetLabelTool( p2 );
+    wxString err2 = m_lastToolError;
+
+    if( ok1 && ok2 )
+        return true;
+
+    // Prefer the most informative error.
+    if( !ok1 && !err1.IsEmpty() )
+        m_lastToolError = err1;
+    else if( !ok2 && !err2.IsEmpty() )
+        m_lastToolError = err2;
+    else
+        m_lastToolError = _( "connect_with_net_label failed." );
+
+    wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+    return false;
+}
+
 bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
 {
     if( !m_frame || !aPayload.is_object() )
@@ -954,6 +1230,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     {
         VECTOR2I pos;
         SCH_SCREEN* screen = nullptr;
+        BOX2I symbolBBox;
     };
 
     // Resolve pin locations on the CURRENT sheet only (keeps results visible; avoids cross-sheet surprises).
@@ -994,7 +1271,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
                 if( ( !name.IsEmpty() && name.CmpNoCase( pinKey ) == 0 )
                     || ( !number.IsEmpty() && number.CmpNoCase( pinKey ) == 0 ) )
                 {
-                    return PIN_LOC{ pin->GetPosition(), sc };
+                    return PIN_LOC{ pin->GetPosition(), sc, sym->GetBoundingBox() };
                 }
             }
         }
@@ -1005,13 +1282,17 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     VECTOR2I start;
     VECTOR2I end;
     SCH_SCREEN* targetScreen = nullptr;
+    bool pinMode = false;
+    PIN_LOC startLoc;
+    PIN_LOC endLoc;
 
     // Mode A: explicit coordinates (mm)
     if( aPayload.contains( "x1" ) && aPayload.contains( "y1" ) && aPayload.contains( "x2" ) && aPayload.contains( "y2" ) )
     {
         if( !aPayload["x1"].is_number() || !aPayload["y1"].is_number() || !aPayload["x2"].is_number() || !aPayload["y2"].is_number() )
         {
-            DisplayError( m_frame, _( "add_wire tool fields x1, y1, x2, y2 must be numbers (mm)." ) );
+            m_lastToolError = _( "add_wire tool fields x1, y1, x2, y2 must be numbers (mm)." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
 
@@ -1027,35 +1308,55 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     // Mode B: pin-to-pin
     else if( aPayload.contains( "from" ) && aPayload.contains( "to" ) && aPayload["from"].is_object() && aPayload["to"].is_object() )
     {
+        pinMode = true;
         const json& from = aPayload["from"];
         const json& to = aPayload["to"];
 
         if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" ) || !to.contains( "pin" ) )
         {
-            DisplayError( m_frame, _( "add_wire pin mode requires: from{reference,pin}, to{reference,pin}." ) );
+            m_lastToolError = _( "add_wire pin mode requires: from{reference,pin}, to{reference,pin}." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
 
-        if( !from["reference"].is_string() || !from["pin"].is_string() || !to["reference"].is_string() || !to["pin"].is_string() )
+        auto asWxString = [&]( const json& v ) -> std::optional<wxString>
         {
-            DisplayError( m_frame, _( "add_wire pin mode fields must be strings." ) );
+            if( v.is_string() )
+                return wxString::FromUTF8( v.get<std::string>() );
+            if( v.is_number_integer() )
+                return wxString::Format( wxS( "%lld" ), v.get<long long>() );
+            return std::nullopt;
+        };
+
+        auto fromRefOpt = asWxString( from["reference"] );
+        auto fromPinOpt = asWxString( from["pin"] );
+        auto toRefOpt = asWxString( to["reference"] );
+        auto toPinOpt = asWxString( to["pin"] );
+
+        if( !fromRefOpt || !fromPinOpt || !toRefOpt || !toPinOpt )
+        {
+            m_lastToolError = _( "add_wire pin mode fields must be strings or integers." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
 
-        wxString fromRef = wxString::FromUTF8( from["reference"].get<std::string>() );
-        wxString fromPin = wxString::FromUTF8( from["pin"].get<std::string>() );
-        wxString toRef = wxString::FromUTF8( to["reference"].get<std::string>() );
-        wxString toPin = wxString::FromUTF8( to["pin"].get<std::string>() );
+        wxString fromRef = *fromRefOpt;
+        wxString fromPin = *fromPinOpt;
+        wxString toRef = *toRefOpt;
+        wxString toPin = *toPinOpt;
 
         auto startOpt = findPinLocOnCurrentSheet( fromRef, fromPin );
         auto endOpt = findPinLocOnCurrentSheet( toRef, toPin );
 
         if( !startOpt || !endOpt )
         {
-            DisplayError( m_frame, _( "add_wire: could not resolve one or both pin locations on the current sheet." ) );
+            m_lastToolError = _( "add_wire: could not resolve one or both pin locations on the current sheet." );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
 
+        startLoc = *startOpt;
+        endLoc = *endOpt;
         start = startOpt->pos;
         end = endOpt->pos;
         targetScreen = startOpt->screen;
@@ -1065,19 +1366,58 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     }
     else
     {
-        DisplayError( m_frame, _( "add_wire requires either x1,y1,x2,y2 (mm) or from/to pin objects." ) );
+        m_lastToolError = _( "add_wire requires either x1,y1,x2,y2 (mm) or from/to pin objects." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
     if( !targetScreen )
         return false;
 
+    if( start == end )
+    {
+        m_lastToolError = _( "add_wire produced a zero-length segment (start == end). Check pin resolution (reference/pin names) on the current sheet." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Escape away from pins/symbol bodies so vertical/horizontal runs don't "touch all pins".
+    // "Add one" extra grid step vs a minimal escape.
+    const int gridStepIU = schIUScale.mmToIU( 2.54 );
+    const int escapeIU = gridStepIU * 2;                // 5.08mm away from pin
+    const int obstacleMarginIU = schIUScale.mmToIU( 1.0 ); // keep away from objects
+
+    auto escapeFromPin = [&]( const PIN_LOC& aLoc ) -> VECTOR2I
+    {
+        BOX2I bbox = aLoc.symbolBBox;
+        bbox.Inflate( obstacleMarginIU );
+
+        const int dl = std::abs( aLoc.pos.x - bbox.GetX() );
+        const int dr = std::abs( bbox.GetRight() - aLoc.pos.x );
+        const int dt = std::abs( aLoc.pos.y - bbox.GetY() );
+        const int db = std::abs( bbox.GetBottom() - aLoc.pos.y );
+
+        const int best = std::min( std::min( dl, dr ), std::min( dt, db ) );
+
+        if( best == dl )
+            return VECTOR2I( aLoc.pos.x - escapeIU, aLoc.pos.y );
+        if( best == dr )
+            return VECTOR2I( aLoc.pos.x + escapeIU, aLoc.pos.y );
+        if( best == dt )
+            return VECTOR2I( aLoc.pos.x, aLoc.pos.y - escapeIU );
+
+        return VECTOR2I( aLoc.pos.x, aLoc.pos.y + escapeIU );
+    };
+
+    const VECTOR2I startEsc = pinMode ? escapeFromPin( startLoc ) : start;
+    const VECTOR2I endEsc   = pinMode ? escapeFromPin( endLoc ) : end;
+
     // Optional: prefer net labels for long connections if net name is provided.
     wxString netName;
     if( aPayload.contains( "net" ) && aPayload["net"].is_string() )
         netName = wxString::FromUTF8( aPayload["net"].get<std::string>() );
 
-    long long manhattanIU = llabs( (long long) ( end.x - start.x ) ) + llabs( (long long) ( end.y - start.y ) );
+    long long manhattanIU = llabs( (long long) ( endEsc.x - startEsc.x ) ) + llabs( (long long) ( endEsc.y - startEsc.y ) );
     const long long labelThresholdIU = schIUScale.mmToIU( 60.0 ); // ~60mm
 
     if( !netName.IsEmpty() && manhattanIU > labelThresholdIU )
@@ -1094,6 +1434,9 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         l2->SetParent( targetScreen );
 
         SCH_COMMIT commit( m_frame );
+        // Ensure items are actually on the screen/view (commit only records undo/redo).
+        m_frame->AddToScreen( l1, targetScreen );
+        m_frame->AddToScreen( l2, targetScreen );
         commit.Added( l1, targetScreen );
         commit.Added( l2, targetScreen );
         commit.Push( _( "Add net labels" ) );
@@ -1119,6 +1462,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         w->SetLayer( LAYER_WIRE );
         w->SetStroke( STROKE_PARAMS() );
         w->SetParent( targetScreen );
+        // Ensure wire is actually on the screen/view (commit only records undo/redo).
+        m_frame->AddToScreen( w, targetScreen );
         aCommit.Added( w, targetScreen );
         return w;
     };
@@ -1144,9 +1489,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
 
             BOX2I bbox = sym->GetBoundingBox();
 
-            // Expand by ~1mm margin
-            const int margin = schIUScale.mmToIU( 1.0 );
-            bbox.Inflate( margin, margin );
+            bbox.Inflate( obstacleMarginIU );
 
             const int xMin = bbox.GetX();
             const int xMax = bbox.GetRight();
@@ -1174,25 +1517,124 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         return hits;
     };
 
-    VECTOR2I bend1( end.x, start.y );
-    VECTOR2I bend2( start.x, end.y );
+    auto segmentHitsWire = [&]( const VECTOR2I& aA, const VECTOR2I& aB ) -> int
+    {
+        if( aA == aB )
+            return 0;
 
-    int score1 = segmentHitsSymbol( start, bend1 ) + segmentHitsSymbol( bend1, end );
-    int score2 = segmentHitsSymbol( start, bend2 ) + segmentHitsSymbol( bend2, end );
+        const bool vertical = aA.x == aB.x;
+        const bool horizontal = aA.y == aB.y;
+        if( !vertical && !horizontal )
+            return 0;
 
-    VECTOR2I bend = ( score2 < score1 ) ? bend2 : bend1;
+        int hits = 0;
+
+        for( SCH_ITEM* item : targetScreen->Items().OfType( SCH_LINE_T ) )
+        {
+            SCH_LINE* line = static_cast<SCH_LINE*>( item );
+            if( !line || line->GetLayer() != LAYER_WIRE )
+                continue;
+
+            BOX2I bbox = line->GetBoundingBox();
+            bbox.Inflate( obstacleMarginIU );
+
+            const int xMin = bbox.GetX();
+            const int xMax = bbox.GetRight();
+            const int yMin = bbox.GetY();
+            const int yMax = bbox.GetBottom();
+
+            if( vertical )
+            {
+                const int x = aA.x;
+                const int y1 = std::min( aA.y, aB.y );
+                const int y2 = std::max( aA.y, aB.y );
+                if( x >= xMin && x <= xMax && !( y2 < yMin || y1 > yMax ) )
+                    hits++;
+            }
+            else
+            {
+                const int y = aA.y;
+                const int x1 = std::min( aA.x, aB.x );
+                const int x2 = std::max( aA.x, aB.x );
+                if( y >= yMin && y <= yMax && !( x2 < xMin || x1 > xMax ) )
+                    hits++;
+            }
+        }
+
+        return hits;
+    };
+
+    auto scoreTwoSeg = [&]( const VECTOR2I& aP0, const VECTOR2I& aP1, const VECTOR2I& aP2 ) -> long long
+    {
+        long long collisions = 0;
+        collisions += segmentHitsSymbol( aP0, aP1 ) + segmentHitsSymbol( aP1, aP2 );
+        collisions += segmentHitsWire( aP0, aP1 ) + segmentHitsWire( aP1, aP2 );
+        long long len = llabs( (long long) ( aP2.x - aP0.x ) ) + llabs( (long long) ( aP2.y - aP0.y ) );
+        return collisions * 1000000LL + len;
+    };
+
+    std::vector<VECTOR2I> bends;
+    bends.push_back( VECTOR2I( endEsc.x, startEsc.y ) );
+    bends.push_back( VECTOR2I( startEsc.x, endEsc.y ) );
+
+    for( int k : { -2, -1, 1, 2 } )
+    {
+        bends.push_back( VECTOR2I( endEsc.x, startEsc.y + k * gridStepIU ) );
+        bends.push_back( VECTOR2I( startEsc.x + k * gridStepIU, endEsc.y ) );
+    }
+
+    VECTOR2I bend = bends.front();
+    long long bestScore = std::numeric_limits<long long>::max();
+
+    for( const VECTOR2I& b : bends )
+    {
+        if( !( ( b.x == startEsc.x || b.y == startEsc.y ) && ( b.x == endEsc.x || b.y == endEsc.y ) ) )
+            continue;
+
+        long long s = scoreTwoSeg( startEsc, b, endEsc );
+        if( s < bestScore )
+        {
+            bestScore = s;
+            bend = b;
+        }
+    }
 
     SCH_COMMIT commit( m_frame );
     std::vector<SCH_LINE*> newWires;
 
-    if( start.x == end.x || start.y == end.y )
+    auto addSegmentIfNeeded = [&]( const VECTOR2I& aA, const VECTOR2I& aB )
     {
-        newWires.push_back( addWireSeg( commit, start, end ) );
+        if( aA == aB )
+            return;
+
+        if( aA.x == aB.x || aA.y == aB.y )
+        {
+            newWires.push_back( addWireSeg( commit, aA, aB ) );
+        }
+        else
+        {
+            VECTOR2I mid( aB.x, aA.y );
+            newWires.push_back( addWireSeg( commit, aA, mid ) );
+            newWires.push_back( addWireSeg( commit, mid, aB ) );
+        }
+    };
+
+    // Pin escape segments first/last.
+    if( pinMode )
+    {
+        addSegmentIfNeeded( start, startEsc );
+        addSegmentIfNeeded( endEsc, end );
+    }
+
+    // Main route between escape points.
+    if( startEsc.x == endEsc.x || startEsc.y == endEsc.y )
+    {
+        addSegmentIfNeeded( startEsc, endEsc );
     }
     else
     {
-        newWires.push_back( addWireSeg( commit, start, bend ) );
-        newWires.push_back( addWireSeg( commit, bend, end ) );
+        addSegmentIfNeeded( startEsc, bend );
+        addSegmentIfNeeded( bend, endEsc );
     }
 
     commit.Push( _( "Add wire" ) );

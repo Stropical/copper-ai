@@ -104,18 +104,22 @@ public:
      * Execute a tool command immediately (used by asynchronous handlers).
      */
     bool RunToolCommand( const wxString& aToolName, const wxString& aPayload );
+    wxString GetLastToolError() const { return m_lastToolError; }
 
 private:
     bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
     bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
     bool HandleMoveComponentTool( const nlohmann::json& aPayload );
     bool HandleAddWireTool( const nlohmann::json& aPayload );
+    bool HandleAddNetLabelTool( const nlohmann::json& aPayload );
+    bool HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
     std::unique_ptr<OLLAMA_CLIENT> m_ollama;
     wxString m_model;  // Default model name
     SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
+    wxString m_lastToolError;
 };
 
 #endif // SCH_OLLAMA_AGENT_TOOL_H

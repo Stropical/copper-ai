@@ -370,21 +370,26 @@ export function ChatWindow() {
     })()
   }
 
-  // Parse tool calls from response text
+  // Parse tool calls from response text.
+  // Supports:
+  // - Lines like: "TOOL schematic.add_wire { ...json... }"
+  // - Lines inside ```tool fenced blocks like: "schematic.add_wire { ...json... }"
   const parseToolCalls = (text: string): ToolCall[] => {
     const toolCalls: ToolCall[] = []
-    const lines = text.split('\n')
-    
-    for (const line of lines) {
+
+    const parseToolLine = (line: string) => {
       const trimmed = line.trim()
-      if (trimmed.startsWith('TOOL ')) {
+      if (!trimmed) return
+
+      // Format A: TOOL <name> <json>
+      if (trimmed.startsWith("TOOL ")) {
         const rest = trimmed.slice(5).trim()
-        const spaceIdx = rest.indexOf(' ')
-        if (spaceIdx === -1) continue
-        
+        const spaceIdx = rest.indexOf(" ")
+        if (spaceIdx === -1) return
+
         const toolName = rest.slice(0, spaceIdx).trim()
         const jsonStr = rest.slice(spaceIdx).trim()
-        
+
         try {
           const args = JSON.parse(jsonStr)
           toolCalls.push({
@@ -393,22 +398,97 @@ export function ChatWindow() {
             arguments: args,
             status: "pending",
           })
-        } catch (e) {
-          // Invalid JSON, skip this tool call
-          console.warn('Failed to parse tool call JSON:', jsonStr)
+        } catch {
+          console.warn("Failed to parse tool call JSON:", jsonStr)
         }
+
+        return
+      }
+
+      // Format B: <name> <json> (common inside ```tool fences)
+      const match = trimmed.match(/^([a-zA-Z0-9_.:-]+)\s+(\{[\s\S]*\})$/)
+      if (!match) return
+
+      const toolName = match[1]
+      const jsonStr = match[2]
+
+      try {
+        const args = JSON.parse(jsonStr)
+        toolCalls.push({
+          id: `tool-${Date.now()}-${toolCalls.length}`,
+          name: toolName,
+          arguments: args,
+          status: "pending",
+        })
+      } catch {
+        console.warn("Failed to parse tool call JSON:", jsonStr)
       }
     }
-    
+
+    const lines = text.split("\n")
+    let inToolFence = false
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+
+      if (trimmed.startsWith("```")) {
+        const fenceLang = trimmed.slice(3).trim().toLowerCase()
+        if (!inToolFence && fenceLang === "tool") {
+          inToolFence = true
+          continue
+        }
+
+        if (inToolFence) {
+          inToolFence = false
+          continue
+        }
+      }
+
+      if (inToolFence) {
+        parseToolLine(line)
+        continue
+      }
+
+      parseToolLine(line)
+    }
+
     return toolCalls
   }
 
-  // Remove tool calls from text to get clean content
+  // Remove tool calls (and ```tool fenced blocks) from text to get clean content
   const removeToolCalls = (text: string): string => {
-    return text
-      .split('\n')
-      .filter(line => !line.trim().startsWith('TOOL '))
-      .join('\n')
+    const lines = text.split("\n")
+    const kept: string[] = []
+    let inToolFence = false
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+
+      if (trimmed.startsWith("```")) {
+        const fenceLang = trimmed.slice(3).trim().toLowerCase()
+        if (!inToolFence && fenceLang === "tool") {
+          inToolFence = true
+          continue
+        }
+
+        if (inToolFence) {
+          inToolFence = false
+          continue
+        }
+      }
+
+      if (inToolFence) {
+        continue
+      }
+
+      // Drop standalone tool lines
+      if (trimmed.startsWith("TOOL ")) continue
+      if (/^([a-zA-Z0-9_.:-]+)\s+\{[\s\S]*\}$/.test(trimmed)) continue
+
+      kept.push(line)
+    }
+
+    return kept.join("\n")
   }
 
   // Split <think>...</think> blocks out of the streamed text.

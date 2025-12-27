@@ -421,10 +421,17 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                                 {
                                     ok = tool->RunToolCommand( wxString::FromUTF8( toolName.c_str() ),
                                                                wxString::FromUTF8( payloadStr.c_str() ) );
+
+                                    if( !ok )
+                                    {
+                                        wxString err = tool->GetLastToolError();
+                                        if( !err.IsEmpty() )
+                                            response["error_message"] = err.ToUTF8().data();
+                                    }
                                 }
 
                                 response["status"] = ok ? "OK" : "ERROR";
-                                if( !ok )
+                                if( !ok && response.find( "error_message" ) == response.end() )
                                     response["error_message"] = "Tool execution failed";
                             }
                         }
