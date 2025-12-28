@@ -1290,6 +1290,77 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     if( m_frame->eeconfig()->m_AutoplaceFields.enable )
         newSymbol->AutoplaceFields( screen, AUTOPLACE_AUTO );
 
+    // Avoid overlapping existing symbols/text by nudging the placement to the nearest free location.
+    // This makes tool-driven placement robust even if the model provides naive coordinates.
+    {
+        const int stepIU = schIUScale.mmToIU( 5.08 );      // 0.2" grid-ish
+        const int marginIU = schIUScale.mmToIU( 1.0 );     // keep a small clearance
+        const int maxRadius = 30;                          // search radius in steps (~150mm)
+
+        auto overlapsExisting = [&]( const BOX2I& aBox ) -> bool
+        {
+            BOX2I test = aBox;
+            test.Inflate( marginIU );
+
+            for( SCH_ITEM* item : screen->Items() )
+            {
+                if( !item )
+                    continue;
+
+                // Only avoid obvious clutter: other symbols and visible text/labels.
+                const KICAD_T t = item->Type();
+                if( t != SCH_SYMBOL_T && t != SCH_TEXT_T && t != SCH_LABEL_T && t != SCH_GLOBAL_LABEL_T )
+                    continue;
+
+                BOX2I bb = item->GetBoundingBox();
+                bb.Inflate( marginIU );
+
+                if( test.Intersects( bb ) )
+                    return true;
+            }
+
+            return false;
+        };
+
+        const VECTOR2I basePos = newSymbol->GetPosition();
+        VECTOR2I chosenPos = basePos;
+        bool found = false;
+
+        // Quick check at the requested position first.
+        if( !overlapsExisting( newSymbol->GetBoundingBox() ) )
+        {
+            found = true;
+        }
+        else
+        {
+            // Spiral search on a grid, perimeter by perimeter.
+            for( int r = 1; r <= maxRadius && !found; ++r )
+            {
+                for( int dx = -r; dx <= r && !found; ++dx )
+                {
+                    for( int dy = -r; dy <= r && !found; ++dy )
+                    {
+                        // Only check the perimeter of this square "ring"
+                        if( std::abs( dx ) != r && std::abs( dy ) != r )
+                            continue;
+
+                        VECTOR2I cand = basePos + VECTOR2I( dx * stepIU, dy * stepIU );
+                        newSymbol->SetPosition( cand );
+
+                        if( !overlapsExisting( newSymbol->GetBoundingBox() ) )
+                        {
+                            chosenPos = cand;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        newSymbol->SetPosition( chosenPos );
+    }
+
     SCH_COMMIT commit( m_frame );
     // Ensure the symbol is permanently added to the screen and view.
     m_frame->AddToScreen( newSymbol, screen );
