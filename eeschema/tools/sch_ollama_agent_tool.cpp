@@ -226,8 +226,16 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
             int unit = symbol->GetUnit();
             int bodyStyle = symbol->GetBodyStyle();
             
-            content << wxString::Format( wxS( "  - Component %s (%s) at (%.2f, %.2f) mm\n" ),
-                                        ref, libId, x_mm, y_mm );
+            BOX2I bbox = symbol->GetBoundingBox();
+            double bxmin = schIUScale.IUTomm( bbox.GetX() );
+            double bymin = schIUScale.IUTomm( bbox.GetY() );
+            double bxmax = schIUScale.IUTomm( bbox.GetRight() );
+            double bymax = schIUScale.IUTomm( bbox.GetBottom() );
+            double width = bxmax - bxmin;
+            double height = bymax - bymin;
+            
+            content << wxString::Format( wxS( "  - Component %s (%s) at (%.2f, %.2f) mm, size=(%.2f, %.2f)mm\n" ),
+                                        ref, libId, x_mm, y_mm, width, height );
             
             if( unit > 1 || bodyStyle > 1 )
             {
@@ -480,8 +488,6 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
             double sx = schIUScale.IUTomm( symPos.x );
             double sy = schIUScale.IUTomm( symPos.y );
             int orientProp = static_cast<int>( symbol->GetOrientationProp() ); // 0/90/180/270
-            bool mirrorX = symbol->GetMirrorX();
-            bool mirrorY = symbol->GetMirrorY();
 
             wxString value;
             wxString footprint;
@@ -505,22 +511,16 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
                     datasheet = field.GetText();
             }
 
-            out << wxS( "- " ) << ref << wxS( " (" ) << libId << wxS( ")" );
-            if( !value.IsEmpty() )
-                out << wxS( " value=" ) << value;
-            if( !footprint.IsEmpty() )
-                out << wxS( " footprint=" ) << footprint;
-            if( !datasheet.IsEmpty() )
-                out << wxS( " datasheet=" ) << datasheet;
             BOX2I bbox = symbol->GetBoundingBox();
             double bxmin = schIUScale.IUTomm( bbox.GetX() );
             double bymin = schIUScale.IUTomm( bbox.GetY() );
             double bxmax = schIUScale.IUTomm( bbox.GetRight() );
             double bymax = schIUScale.IUTomm( bbox.GetBottom() );
+            double width = bxmax - bxmin;
+            double height = bymax - bymin;
 
-            out << wxString::Format( wxS( " pos=(%.2f, %.2f) rot=%d mirrorX=%d mirrorY=%d bbox=(%.2f, %.2f, %.2f, %.2f)\n" ),
-                                     sx, sy, orientProp, mirrorX ? 1 : 0, mirrorY ? 1 : 0,
-                                     bxmin, bymin, bxmax, bymax );
+            out << wxString::Format( wxS( " - %s (%s) value=%s footprint=%s datasheet=%s pos=(%.2f, %.2f) rot=%d size=(%.2f, %.2f)mm bbox=(%.2f, %.2f, %.2f, %.2f)\n" ),
+                                     ref, libId, value, footprint, datasheet, sx, sy, orientProp, width, height, bxmin, bymin, bxmax, bymax );
 
             std::vector<SCH_PIN*> pins = symbol->GetPins( &sheetPath );
             for( SCH_PIN* pin : pins )
@@ -807,7 +807,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
     }
 
     if( aToolName.CmpNoCase( wxS( "schematic.add_net_label" ) ) == 0
-        || aToolName.CmpNoCase( wxS( "schematic.add_global_label" ) ) == 0 )
+        || aToolName.CmpNoCase( wxS( "schematic.add_global_label" ) ) == 0
+        || aToolName.CmpNoCase( wxS( "schematic.add_label" ) ) == 0 )
     {
         try
         {
@@ -816,7 +817,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            m_lastToolError = wxString::Format( _( "add_net_label payload parse error: %s" ),
+            m_lastToolError = wxString::Format( _( "add_label payload parse error: %s" ),
                                                 wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
@@ -1290,8 +1291,23 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
         newSymbol->AutoplaceFields( screen, AUTOPLACE_AUTO );
 
     SCH_COMMIT commit( m_frame );
+    // Ensure the symbol is permanently added to the screen and view.
+    m_frame->AddToScreen( newSymbol, screen );
     commit.Added( newSymbol, screen );
     commit.Push( _( "Place component" ) );
+    
+    // Ensure the canvas refreshes so the new component is visible immediately.
+    if( m_frame->GetCanvas() )
+    {
+        if( auto view = m_frame->GetCanvas()->GetView() )
+        {
+            view->Update( newSymbol );
+        }
+
+        m_frame->GetCanvas()->Refresh();
+    }
+
+    m_frame->OnModify();
     
     // Return the assigned reference so the agent can use it for labels/wiring.
     json res = json::object();
@@ -1472,20 +1488,28 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         return std::nullopt;
     };
 
-    if( !aPayload.contains( "net" ) || !aPayload["net"].is_string() )
+    // Handle both "net" and "text" fields for labels.
+    wxString labelText;
+    if( aPayload.contains( "net" ) && aPayload["net"].is_string() )
+        labelText = wxString::FromUTF8( aPayload["net"].get<std::string>() );
+    else if( aPayload.contains( "text" ) && aPayload["text"].is_string() )
+        labelText = wxString::FromUTF8( aPayload["text"].get<std::string>() );
+
+    labelText.Trim( true ).Trim( false );
+    if( labelText.IsEmpty() )
     {
-        m_lastToolError = _( "add_net_label requires \"net\" (string)." );
+        m_lastToolError = _( "add_label requires a \"net\" or \"text\" field." );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
-    wxString net = wxString::FromUTF8( aPayload["net"].get<std::string>() );
-    net.Trim( true ).Trim( false );
-    if( net.IsEmpty() )
+    // Determine label type: global (default) or local.
+    bool isLocal = false;
+    if( aPayload.contains( "type" ) && aPayload["type"].is_string() )
     {
-        m_lastToolError = _( "add_net_label requires non-empty \"net\"." );
-        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
-        return false;
+        wxString typeStr = wxString::FromUTF8( aPayload["type"].get<std::string>() );
+        if( typeStr.CmpNoCase( wxS( "local" ) ) == 0 || typeStr.CmpNoCase( wxS( "net" ) ) == 0 )
+            isLocal = true;
     }
 
     // Default placement target is the current sheet, but pin-mode may redirect to the sheet
@@ -1618,16 +1642,23 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
 
     if( !havePos )
     {
-        m_lastToolError = _( "add_net_label requires either x,y (mm) or at{reference,pin}." );
+        m_lastToolError = _( "add_label requires either x,y (mm) or at{reference,pin}." );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
-    // NOTE: This tool creates a GLOBAL label (SCH_GLOBALLABEL), not a local net label,
-    // so it can connect across sheets/hierarchy.
-    SCH_GLOBALLABEL* label = new SCH_GLOBALLABEL( pos, net );
+    SCH_LABEL_BASE* label = nullptr;
+    if( isLocal )
+    {
+        label = new SCH_LABEL( pos, labelText );
+    }
+    else
+    {
+        label = new SCH_GLOBALLABEL( pos, labelText );
+    }
+
     label->SetPosition( pos );
-    label->SetText( net );
+    label->SetText( labelText );
     label->SetParent( targetScreen );
     label->SetSpinStyle( spinStyle );
 
@@ -1648,7 +1679,20 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
 
     m_frame->AddToScreen( label, targetScreen );
     commit.Added( label, targetScreen );
-    commit.Push( _( "Add global label" ) );
+    commit.Push( isLocal ? _( "Add net label" ) : _( "Add global label" ) );
+
+    if( m_frame->GetCanvas() )
+    {
+        if( auto view = m_frame->GetCanvas()->GetView() )
+        {
+            if( stub ) view->Update( stub );
+            view->Update( label );
+        }
+
+        m_frame->GetCanvas()->Refresh();
+    }
+
+    m_frame->OnModify();
 
     if( m_frame->GetToolManager() )
     {
@@ -1656,9 +1700,6 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
             m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
         m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
     }
-
-    if( m_frame->GetCanvas() )
-        m_frame->GetCanvas()->Refresh();
 
     return true;
 }
@@ -1969,6 +2010,19 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         commit.Added( l2, targetScreen );
         commit.Push( _( "Add net labels" ) );
 
+        if( m_frame->GetCanvas() )
+        {
+            if( auto view = m_frame->GetCanvas()->GetView() )
+            {
+                view->Update( l1 );
+                view->Update( l2 );
+            }
+
+            m_frame->GetCanvas()->Refresh();
+        }
+
+        m_frame->OnModify();
+
         if( m_frame->GetToolManager() )
         {
             m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
@@ -2167,13 +2221,6 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
 
     commit.Push( _( "Add wire" ) );
 
-    if( m_frame->GetToolManager() )
-    {
-        for( SCH_LINE* w : newWires )
-            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
-    }
-
-    // Ensure the canvas refreshes so the new wire is visible immediately.
     if( m_frame->GetCanvas() )
     {
         if( auto view = m_frame->GetCanvas()->GetView() )
@@ -2183,6 +2230,14 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         }
 
         m_frame->GetCanvas()->Refresh();
+    }
+
+    m_frame->OnModify();
+
+    if( m_frame->GetToolManager() )
+    {
+        for( SCH_LINE* w : newWires )
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
     }
 
     return true;

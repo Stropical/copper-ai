@@ -31,7 +31,7 @@ const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1
 const AGENT_BASE_URL = AGENT_API_URL.replace(/\/api\/generate\/?$/, "")
 
 // Serial tool mode: execute one tool call at a time, then let the model continue.
-const SERIAL_TOOL_MODE = true
+const SERIAL_TOOL_MODE = false
 
 export function ChatWindow() {
   const [messages, setMessages] = React.useState<Message[]>([
@@ -200,19 +200,25 @@ export function ChatWindow() {
 
     try {
       const resp = await sendRpcCommand("RUN_TOOL", { tool_name: toolName, payload })
-      const ok = resp?.status === "OK"
+      if (!resp || typeof resp !== "object") {
+        throw new Error("Invalid response from tool execution")
+      }
+      
+      const ok = resp.status === "OK"
+      const respData = resp.data
+      const errorMessage = resp.error_message
 
       const isReadOnlyTool = toolName === "schematic.search_symbol" || toolName === "schematic.get_datasheet"
 
       // If this was a datasheet query, ingest it into pcb_agent's RAG DB automatically.
       let datasheetIngestNote: string | null = null
-      if (ok && toolName === "schematic.get_datasheet" && typeof resp?.data === "string" && resp.data.trim()) {
+      if (ok && toolName === "schematic.get_datasheet" && typeof respData === "string" && respData.trim()) {
         try {
           const ingestResp = await fetch(`${AGENT_BASE_URL}/api/datasheet/ingest`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              kicad_datasheet: resp.data,
+              kicad_datasheet: respData,
               session_id: sessionId,
               source: "kicad_tool_schematic.get_datasheet",
             }),
@@ -238,28 +244,47 @@ export function ChatWindow() {
                   ...tc,
                   status: ok ? (isReadOnlyTool ? ("accepted" as const) : ("pending" as const)) : ("rejected" as const),
                   result: ok
-                    ? (datasheetIngestNote ? `${resp?.data || ""}\n\n${datasheetIngestNote}` : resp?.data || "Applied (awaiting accept)")
-                    : (resp?.error_message || "Execution failed"),
+                    ? (datasheetIngestNote ? `${respData || ""}\n\n${datasheetIngestNote}` : (typeof respData === "string" ? respData : "Applied (awaiting accept)"))
+                    : (typeof errorMessage === "string" ? errorMessage : "Execution failed"),
                 }
               : tc
           )
-          return { ...msg, toolCalls: updatedToolCalls }
+          
+          // Update todos: mark completed when tool succeeds
+          let updatedTodos = msg.todos
+          if (ok && msg.todos) {
+            updatedTodos = msg.todos.map((todo) => {
+              // If todo task mentions this tool or component, mark as completed
+              const toolNameLower = toolName.toLowerCase()
+              const todoLower = todo.task.toLowerCase()
+              if (
+                todo.status === "in_progress" ||
+                (todoLower.includes(toolNameLower) || todoLower.includes("place") || todoLower.includes("connect") || todoLower.includes("wire") || todoLower.includes("search"))
+              ) {
+                return { ...todo, status: "completed" as const }
+              }
+              return todo
+            })
+          }
+          
+          return { ...msg, toolCalls: updatedToolCalls, todos: updatedTodos }
         })
       )
 
       // Agentic auto-continue: after tool calls (read-only or serial mode), feed results back to the model.
       const shouldChain =
         ok &&
-        typeof resp?.data === "string" &&
-        resp.data.trim() &&
+        typeof respData === "string" &&
+        respData.trim() &&
         (isReadOnlyTool || opts?.chainAllTools)
 
-      if (shouldChain) {
+      if (shouldChain && respData) {
+        // Silently continue the agent chain without showing a user message
         const continuation = [
           "TOOL_RESULT",
           `tool_name: ${toolName}`,
           "data:",
-          resp.data,
+          respData,
           "",
           "Continue the original task. Use this tool result and proceed to the next step.",
         ].join("\n")
@@ -268,8 +293,8 @@ export function ChatWindow() {
           // Prefer continuing the agentic chain before any user-typed queued prompt.
           queuedAutoPromptRef.current = continuation
         } else {
-          // Fire-and-forget to keep UI responsive.
-          setTimeout(() => void sendPrompt(continuation), 0)
+          // Fire-and-forget to keep UI responsive - send silently (no user message)
+          setTimeout(() => void sendPrompt(continuation, true), 0)
         }
       }
     } catch (e: any) {
@@ -291,9 +316,9 @@ export function ChatWindow() {
     }
   }
 
-  const handleToolCallAccept = (messageId: string, toolCallId: string) => {
-    // Tools now auto-run on arrival. Accept = "keep" (no-op in KiCad).
-    void sendRpcCommand("CLEAR_SELECTION", {})
+  const handleToolCallAccept = async (messageId: string, toolCallId: string) => {
+    // Mark as accepted in UI - the tool already executed and committed via commit.Push()
+    // Accept is just a UI state change to indicate user approval
     setMessages((prev) =>
       prev.map((msg) => {
         if (msg.id !== messageId) return msg
@@ -303,6 +328,13 @@ export function ChatWindow() {
         return { ...msg, toolCalls: updatedToolCalls }
       })
     )
+    
+    // Clear selection to ensure visibility
+    try {
+      await sendRpcCommand("CLEAR_SELECTION", {})
+    } catch (e) {
+      // Ignore errors - clearing selection is optional
+    }
   }
 
   const handleToolCallUndo = (messageId: string, toolCallId: string) => {
@@ -530,15 +562,19 @@ export function ChatWindow() {
     return toolCalls
   }
 
-  // Remove tool calls (and ```tool fenced blocks) from text to get clean content
+  // Remove tool calls, plan sections, and JSON plan objects from text to get clean content
   const removeToolCalls = (text: string): string => {
     const lines = text.split("\n")
     const kept: string[] = []
     let inToolFence = false
+    let inPlanSection = false
+    let inJsonBlock = false
+    let jsonDepth = 0
 
     for (const line of lines) {
       const trimmed = line.trim()
 
+      // Handle code fences
       if (trimmed.startsWith("```")) {
         const fenceLang = trimmed.slice(3).trim().toLowerCase()
         if (!inToolFence && fenceLang === "tool") {
@@ -550,15 +586,52 @@ export function ChatWindow() {
           inToolFence = false
           continue
         }
+        
+        // Skip other code fences (like json)
+        if (fenceLang === "json" || fenceLang === "") {
+          inJsonBlock = !inJsonBlock
+          continue
+        }
       }
 
-      if (inToolFence) {
+      if (inToolFence || inJsonBlock) {
         continue
       }
 
       // Drop standalone tool lines
       if (trimmed.startsWith("TOOL ")) continue
       if (/^([a-zA-Z0-9_.:-]+)\s+\{[\s\S]*\}$/.test(trimmed)) continue
+      
+      // Drop "Plan:" headers and plan sections
+      if (trimmed.match(/^Plan:\s*$/i)) {
+        inPlanSection = true
+        continue
+      }
+      
+      // Stop plan section after a blank line or new section
+      if (inPlanSection && (trimmed === "" || trimmed.match(/^(Manager|Specialist|TOOL|json)/i))) {
+        if (trimmed !== "" && !trimmed.match(/^(Manager|Specialist)/i)) {
+          inPlanSection = false
+        } else if (trimmed.match(/^(TOOL|json)/i)) {
+          inPlanSection = false
+        }
+      }
+      
+      if (inPlanSection) {
+        continue
+      }
+      
+      // Drop JSON plan objects
+      if (trimmed.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(trimmed)
+          if (parsed.plan || parsed.todos) {
+            continue
+          }
+        } catch {
+          // Not JSON, keep the line
+        }
+      }
 
       kept.push(line)
     }
@@ -613,18 +686,20 @@ export function ChatWindow() {
     }
   }
 
-  const sendPrompt = async (promptText: string) => {
+  const sendPrompt = async (promptText: string, silent: boolean = false) => {
     const trimmedPrompt = promptText.trim()
     if (!trimmedPrompt) return
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: trimmedPrompt,
-      timestamp: new Date(),
+    // Only add user message if not silent (silent = agent auto-continuation)
+    if (!silent) {
+      const userMessage: Message = {
+        id: Date.now().toString(),
+        role: "user",
+        content: trimmedPrompt,
+        timestamp: new Date(),
+      }
+      setMessages((prev) => [...prev, userMessage])
     }
-
-    setMessages((prev) => [...prev, userMessage])
     setIsLoading(true)
 
     try {
@@ -698,6 +773,24 @@ export function ChatWindow() {
           try {
             const data = JSON.parse(trimmed)
             const responseText = data.response || ""
+
+            // Parse plan/todos from the response
+            if (data.plan && data.plan.todos && Array.isArray(data.plan.todos)) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId
+                    ? {
+                        ...msg,
+                        todos: data.plan.todos.map((todo: any) => ({
+                          id: todo.id || `todo-${Date.now()}-${Math.random()}`,
+                          task: todo.task || todo.description || "",
+                          status: (todo.status || "pending") as "pending" | "completed" | "cancelled" | "in_progress",
+                        })),
+                      }
+                    : msg
+                )
+              )
+            }
 
             // If the agent signals auth is required, show a login banner/button.
             if (data.auth_required) {
@@ -775,11 +868,41 @@ export function ChatWindow() {
                   )
                 )
 
-                // Auto-run tool calls immediately as they arrive, but in serial mode only the first one.
-                const firstTc = toolCallsToShow[0]
-                await runToolCallNow(assistantMessageId, firstTc.id, firstTc.name, firstTc.arguments, {
-                  chainAllTools: SERIAL_TOOL_MODE,
-                })
+                // Run tool calls sequentially
+                for (let i = 0; i < toolCallsToShow.length; i++) {
+                  const firstTc = toolCallsToShow[i]
+                  const isLast = i === toolCallsToShow.length - 1
+                  
+                  // Update todos: mark relevant todo as "in_progress"
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            todos: msg.todos?.map((todo) => {
+                              // If todo task mentions this tool or component, mark as in_progress
+                              const toolNameLower = firstTc.name.toLowerCase()
+                              const todoLower = todo.task.toLowerCase()
+                              if (
+                                todoLower.includes(toolNameLower) ||
+                                todoLower.includes("place") ||
+                                todoLower.includes("connect") ||
+                                todoLower.includes("wire") ||
+                                todoLower.includes("search")
+                              ) {
+                                return { ...todo, status: "in_progress" as const }
+                              }
+                              return todo
+                            }),
+                          }
+                        : msg
+                    )
+                  )
+
+                  await runToolCallNow(assistantMessageId, firstTc.id, firstTc.name, firstTc.arguments, {
+                    chainAllTools: SERIAL_TOOL_MODE || isLast,
+                  })
+                }
 
                 if (toolCalls.length > 1 && SERIAL_TOOL_MODE) {
                   console.info(
@@ -832,17 +955,18 @@ export function ChatWindow() {
       setIsLoading(false)
 
       // Auto-send queued prompt (if you typed ahead while streaming)
+      // Auto-continuation prompts are sent silently (no user message shown)
       const autoNext = queuedAutoPromptRef.current
       if (autoNext && autoNext.trim()) {
         queuedAutoPromptRef.current = null
-        setTimeout(() => void sendPrompt(autoNext), 0)
+        setTimeout(() => void sendPrompt(autoNext, true), 0)
       } else {
         const next = queuedPromptRef.current
         if (next && next.trim()) {
           queuedPromptRef.current = null
           setQueuedPrompt(null)
-          // Fire-and-forget; avoid blocking UI
-          setTimeout(() => void sendPrompt(next), 0)
+          // Fire-and-forget; avoid blocking UI - user prompts are NOT silent
+          setTimeout(() => void sendPrompt(next, false), 0)
         }
       }
     }
@@ -974,6 +1098,42 @@ export function ChatWindow() {
                     </Avatar>
                   )}
                 </div>
+
+                {/* Todos - Display plan */}
+                {message.todos && message.todos.length > 0 && (
+                  <div className="ml-9 space-y-1">
+                    <div className="text-xs text-[#9AA3AD] font-medium mb-1">Plan:</div>
+                    {message.todos.map((todo) => (
+                      <div
+                        key={todo.id}
+                        className="flex items-center gap-2 text-xs text-[#9AA3AD]"
+                      >
+                        <div className="w-4 h-4 flex items-center justify-center shrink-0">
+                          {todo.status === "completed" ? (
+                            <Check className="h-3 w-3 text-[#C7773A]" />
+                          ) : todo.status === "in_progress" ? (
+                            <div className="w-2 h-2 rounded-full bg-[#C7773A] animate-pulse" />
+                          ) : todo.status === "cancelled" ? (
+                            <X className="h-3 w-3 text-[#9AA3AD]" />
+                          ) : (
+                            <div className="w-2 h-2 rounded-full border border-[#2C333D]" />
+                          )}
+                        </div>
+                        <span
+                          className={
+                            todo.status === "completed"
+                              ? "text-[#7C8590] line-through"
+                              : todo.status === "in_progress"
+                              ? "text-[#C7773A]"
+                              : "text-[#9AA3AD]"
+                          }
+                        >
+                          {todo.task}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Tool Calls - Compact display */}
                 {message.toolCalls && message.toolCalls.length > 0 && (
