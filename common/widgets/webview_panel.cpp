@@ -256,5 +256,27 @@ void WEBVIEW_PANEL::OnScriptResult( wxWebViewEvent& aEvt )
 void WEBVIEW_PANEL::OnError( wxWebViewEvent& aEvt )
 {
     m_loadError = true;
-    wxLogDebug( "WebView error: %s", aEvt.GetString() );
+    wxLogDebug( "WebView error: %s (url=%s)", aEvt.GetString(), aEvt.GetURL() );
+
+    wxString msg = aEvt.GetString();
+    wxString url = aEvt.GetURL();
+
+    auto escape = []( wxString s )
+    {
+        s.Replace( "&", "&amp;" );
+        s.Replace( "<", "&lt;" );
+        s.Replace( ">", "&gt;" );
+        return s;
+    };
+
+    wxString html;
+    html << wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body "
+                 "style='background:#0A0A0A;color:#E5E5E5;font-family:system-ui;padding:16px;'>" )
+         << wxS( "<h2 style='margin:0 0 8px 0;'>WebView load error</h2>" )
+         << wxS( "<div style='margin:0 0 8px 0;'><strong>URL:</strong> <code>" ) << escape( url )
+         << wxS( "</code></div>" )
+         << wxS( "<div><strong>Message:</strong> <code>" ) << escape( msg ) << wxS( "</code></div>" )
+         << wxS( "</body></html>" );
+
+    m_browser->SetPage( html, "file://" );
 }

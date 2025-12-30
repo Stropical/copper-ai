@@ -29,6 +29,14 @@ pnpm dev
 yarn dev
 ```
 
+** IMPORTANT ** If you are running the development server, you need to set the environment variable `KICAD_AGENT_PANEL_DEV_URL` to `http://localhost:3000` in the KiCad environment.
+
+Create `.env` in main directory and add the following:
+
+```txt
+KICAD_AGENT_PANEL_DEV_URL=http://localhost:3000
+```
+
 4. Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Building for Production
