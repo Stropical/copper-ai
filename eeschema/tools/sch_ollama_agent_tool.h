@@ -128,6 +128,7 @@ private:
     bool HandleAddNetLabelTool( const nlohmann::json& aPayload );
     bool HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
     bool HandleGetDatasheetTool( const nlohmann::json& aPayload );
+    bool HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
     bool HandleSearchSymbolTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 

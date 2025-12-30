@@ -641,9 +641,19 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
             wxString lowerTool = toolName;
             lowerTool.MakeLower();
 
+            // Bug fix: Updated to include all tools that ExecuteToolCommand actually handles
             bool supportedTool =
                     lowerTool == wxS( "schematic.place_component" )
                     || lowerTool == wxS( "schematic.move_component" )
+                    || lowerTool == wxS( "schematic.add_wire" )
+                    || lowerTool == wxS( "schematic.add_net_label" )
+                    || lowerTool == wxS( "schematic.add_global_label" )
+                    || lowerTool == wxS( "schematic.add_label" )
+                    || lowerTool == wxS( "schematic.connect_with_net_label" )
+                    || lowerTool == wxS( "schematic.connect_with_global_label" )
+                    || lowerTool == wxS( "schematic.get_datasheet" )
+            || lowerTool == wxS( "schematic.get_symbol_info" )
+                    || lowerTool == wxS( "schematic.search_symbol" )
                     || lowerTool == wxS( "mock.selection_inspector" );
 
             if( !supportedTool )
@@ -867,6 +877,22 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         catch( const json::exception& e )
         {
             m_lastToolError = wxString::Format( _( "search_symbol payload parse error: %s" ),
+                                                wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.get_symbol_info" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleGetSymbolInfoTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError = wxString::Format( _( "get_symbol_info payload parse error: %s" ),
                                                 wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
@@ -1118,6 +1144,80 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
         row["score"] = m.score;
         out["matches"].push_back( row );
     }
+
+    m_lastToolResult = wxString::FromUTF8( out.dump( 2 ) );
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleGetSymbolInfoTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    if( !aPayload.contains( "symbol" ) || !aPayload["symbol"].is_string() )
+    {
+        m_lastToolError = _( "get_symbol_info requires \"symbol\" (string), e.g. {\"symbol\":\"Device:R\"}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString symbolId = wxString::FromUTF8( aPayload["symbol"].get<std::string>() );
+    symbolId.Trim( true ).Trim( false );
+
+    if( symbolId.IsEmpty() )
+    {
+        m_lastToolError = _( "get_symbol_info requires a non-empty symbol identifier (libnick:symbol_name)." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    LIB_ID libId;
+    UTF8 utfSymbol( symbolId.ToStdString().c_str() );
+
+    if( libId.Parse( utfSymbol ) >= 0 || !libId.IsValid() )
+    {
+        m_lastToolError = wxString::Format( _( "Unable to parse library identifier \"%s\". Use libnick:symbol_name." ),
+                                            symbolId );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    LIB_SYMBOL* libSymbol = m_frame->GetLibSymbol( libId );
+    if( !libSymbol )
+    {
+        m_lastToolError = wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ), symbolId );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString description = libSymbol->GetDescription();
+    wxString keywords = libSymbol->GetKeyWords();
+    wxString docFile = libSymbol->GetDatasheetProp();
+
+    json out = json::object();
+    out["symbol"] = symbolId.ToStdString();
+    out["library"] = libId.GetLibNickname();
+    out["name"] = libId.GetLibItemName();
+    out["description"] = description.ToStdString();
+    out["keywords"] = keywords.ToStdString();
+    out["datasheet"] = docFile.ToStdString();
+
+    // Provide pin count summary
+    json pins = json::array();
+    const std::vector<SCH_PIN*> pinList = libSymbol->GetPins();
+    for( const SCH_PIN* p : pinList )
+    {
+        if( !p )
+            continue;
+        json pj = json::object();
+        pj["number"] = p->GetNumber().ToStdString();
+        pj["name"] = p->GetName().ToStdString();
+        pj["type"] = p->GetElectricalTypeName().ToStdString();
+        pins.push_back( pj );
+    }
+    out["pin_count"] = (int) pins.size();
+    out["pins"] = pins;
 
     m_lastToolResult = wxString::FromUTF8( out.dump( 2 ) );
     return true;

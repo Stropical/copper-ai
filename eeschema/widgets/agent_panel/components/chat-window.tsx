@@ -18,6 +18,7 @@ interface Message {
   timestamp: Date
   toolCalls?: ToolCall[]
   todos?: { id: string; task: string; status: "pending" | "completed" | "cancelled" | "in_progress" }[]
+  agent?: string
 }
 
 const MODELS = [
@@ -184,8 +185,7 @@ export function ChatWindow() {
     messageId: string,
     toolCallId: string,
     toolName: string,
-    payload: any,
-    opts?: { chainAllTools?: boolean }
+    payload: any
   ) => {
     // Mark running
     setMessages((prev) =>
@@ -242,41 +242,41 @@ export function ChatWindow() {
             tc.id === toolCallId
               ? {
                   ...tc,
-                  status: ok ? (isReadOnlyTool ? ("accepted" as const) : ("pending" as const)) : ("rejected" as const),
+                  // Bug fix: Do not block awaiting accept mid-run; auto-accept successful tools and allow undo at the end.
+                  status: ok ? ("accepted" as const) : ("rejected" as const),
                   result: ok
-                    ? (datasheetIngestNote ? `${respData || ""}\n\n${datasheetIngestNote}` : (typeof respData === "string" ? respData : "Applied (awaiting accept)"))
+                    ? (datasheetIngestNote ? `${respData || ""}\n\n${datasheetIngestNote}` : (typeof respData === "string" ? respData : "Applied"))
                     : (typeof errorMessage === "string" ? errorMessage : "Execution failed"),
                 }
               : tc
           )
           
-          // Update todos: mark completed when tool succeeds
-          let updatedTodos = msg.todos
-          if (ok && msg.todos) {
-            updatedTodos = msg.todos.map((todo) => {
-              // If todo task mentions this tool or component, mark as completed
-              const toolNameLower = toolName.toLowerCase()
-              const todoLower = todo.task.toLowerCase()
-              if (
-                todo.status === "in_progress" ||
-                (todoLower.includes(toolNameLower) || todoLower.includes("place") || todoLower.includes("connect") || todoLower.includes("wire") || todoLower.includes("search"))
-              ) {
-                return { ...todo, status: "completed" as const }
-              }
-              return todo
-            })
-          }
+                          // Update todos: mark completed when tool succeeds
+                          // Bug fix: Only mark the current in_progress todo as completed, not all matching ones
+                          let updatedTodos = msg.todos
+                          if (ok && msg.todos) {
+                            let foundInProgress = false
+                            updatedTodos = msg.todos.map((todo) => {
+                              // Only complete the first in_progress todo (the current one)
+                              if (!foundInProgress && todo.status === "in_progress") {
+                                foundInProgress = true
+                                return { ...todo, status: "completed" as const }
+                              }
+                              return todo
+                            })
+                          }
           
           return { ...msg, toolCalls: updatedToolCalls, todos: updatedTodos }
         })
       )
 
-      // Agentic auto-continue: after tool calls (read-only or serial mode), feed results back to the model.
+      // Agentic auto-continue: after tool calls, feed results back to the model.
+      // Bug fix: Enable chaining for all successful tools, not just read-only ones
+      // This allows the agent to continue to the next step after placement/wiring
       const shouldChain =
         ok &&
         typeof respData === "string" &&
-        respData.trim() &&
-        (isReadOnlyTool || opts?.chainAllTools)
+        respData.trim()
 
       if (shouldChain && respData) {
         // Silently continue the agent chain without showing a user message
@@ -423,8 +423,9 @@ export function ChatWindow() {
 
   const handleUndoAll = () => {
     if (!latestMessageWithToolCalls) return
+    // Bug fix: Only count accepted tools for undo - pending ones haven't been committed to undo stack
     const countToUndo =
-      latestMessageWithToolCalls.toolCalls?.filter((tc) => tc.status === "accepted" || tc.status === "pending").length ||
+      latestMessageWithToolCalls.toolCalls?.filter((tc) => tc.status === "accepted").length ||
       0
 
     if (countToUndo <= 0) return
@@ -714,6 +715,7 @@ export function ChatWindow() {
       // Create thinking + assistant messages that will be updated as we stream
       const assistantMessageId = `assistant-${Date.now()}`
       const thinkingMessageId = `thinking-${assistantMessageId}`
+      const managerMessageId = `manager-${assistantMessageId}`
       let accumulatedText = ""
       let lastVisibleText = ""
 
@@ -723,6 +725,14 @@ export function ChatWindow() {
         content: "",
         timestamp: new Date(),
         toolCalls: [],
+        agent: "specialist",
+      }
+      const managerMessage: Message = {
+        id: managerMessageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        agent: "manager",
       }
       const thinkingMessage: Message = {
         id: thinkingMessageId,
@@ -731,7 +741,7 @@ export function ChatWindow() {
         timestamp: new Date(),
       }
 
-      setMessages((prev) => [...prev, thinkingMessage, assistantMessage])
+      setMessages((prev) => [...prev, thinkingMessage, managerMessage, assistantMessage])
 
       const response = await fetch(AGENT_API_URL, {
         method: "POST",
@@ -773,6 +783,8 @@ export function ChatWindow() {
           try {
             const data = JSON.parse(trimmed)
             const responseText = data.response || ""
+            const agentTag = typeof data.agent === "string" ? data.agent : null
+            const targetMessageId = agentTag === "manager" ? managerMessageId : assistantMessageId
 
             // Parse plan/todos from the response
             if (data.plan && data.plan.todos && Array.isArray(data.plan.todos)) {
@@ -801,16 +813,29 @@ export function ChatWindow() {
             }
 
             if (responseText) {
-              accumulatedText += responseText
+              // Update the agent label on the correct message bubble
+              if (agentTag) {
+                setMessages((prev) =>
+                  prev.map((msg) => (msg.id === targetMessageId ? { ...msg, agent: agentTag } : msg))
+                )
+              }
+
+              // Accumulate content for tool parsing only from the specialist/executor stream
+              if (targetMessageId === assistantMessageId) {
+                accumulatedText += responseText
+              }
 
               // Update message with accumulated text (but don't show tool calls yet)
-              const { visibleText, thinkingText, thinkingOpen } = splitThinking(accumulatedText)
-              lastVisibleText = visibleText
+              const textToRender = targetMessageId === assistantMessageId ? accumulatedText : responseText
+              const { visibleText, thinkingText, thinkingOpen } = splitThinking(textToRender)
+              if (targetMessageId === assistantMessageId) {
+                lastVisibleText = visibleText
+              }
               const contentWithoutTools = removeToolCalls(visibleText).trim()
 
               setMessages((prev) =>
                 prev.map((msg) =>
-                  msg.id === assistantMessageId
+                  msg.id === targetMessageId
                     ? {
                         ...msg,
                         content: contentWithoutTools || "Processing...",
@@ -899,9 +924,7 @@ export function ChatWindow() {
                     )
                   )
 
-                  await runToolCallNow(assistantMessageId, firstTc.id, firstTc.name, firstTc.arguments, {
-                    chainAllTools: SERIAL_TOOL_MODE || isLast,
-                  })
+                                  await runToolCallNow(assistantMessageId, firstTc.id, firstTc.name, firstTc.arguments)
                 }
 
                 if (toolCalls.length > 1 && SERIAL_TOOL_MODE) {
@@ -1064,6 +1087,17 @@ export function ChatWindow() {
                         : "bg-[#151A21] border border-[#2C333D] text-[#E7E9EC]"
                     }`}
                   >
+                    {message.role === "assistant" && message.agent && message.content.trim() && (
+                      <div className="text-[10px] uppercase tracking-wide text-[#9AA3AD] mb-1">
+                        {message.agent === "manager"
+                          ? "Manager"
+                          : message.agent === "part_finder"
+                          ? "Part Finder"
+                          : message.agent === "schematic_designer"
+                          ? "Schematic Designer"
+                          : message.agent}
+                      </div>
+                    )}
                     <Streamdown
                       mode={
                         message.role === "assistant" &&
