@@ -824,6 +824,9 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
     wxPoint canvas_pos = GetCanvas()->GetScreenPosition();
     hierarchy_pane.FloatingPosition( canvas_pos.x + 10, canvas_pos.y + 10 );
 
+    if( ADVANCED_CFG::GetCfg().m_EnableVariantsUI )
+        Bind( wxEVT_CHOICE, &SCH_EDIT_FRAME::onVariantSelected, this );
+
     Bind( EDA_EVT_CLOSE_DIALOG_BOOK_REPORTER, &SCH_EDIT_FRAME::onCloseSymbolDiffDialog, this );
     Bind( EDA_EVT_CLOSE_ERC_DIALOG, &SCH_EDIT_FRAME::onCloseErcDialog, this );
     Bind( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, &SCH_EDIT_FRAME::onCloseSymbolFieldsTableDialog, this );
@@ -3412,7 +3415,7 @@ void SCH_EDIT_FRAME::RemoveVariant()
 
     wxString variantName = dlg.GetStringSelection();
 
-    if( variantName.IsEmpty() || ( m_currentVariantCtrl->FindString( variantName ) != wxNOT_FOUND ) )
+    if( variantName.IsEmpty() )
         return;
 
     Schematic().DeleteVariant( variantName );
@@ -3438,6 +3441,8 @@ void SCH_EDIT_FRAME::RemoveVariant()
             SetCurrentVariant( wxEmptyString );
         }
     }
+
+    GetCanvas()->Refresh();
 }
 
 
