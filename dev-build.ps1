@@ -58,6 +58,8 @@ $BuildPreset = "win64-debug"
 $ConfigurePreset = "msvc-win64-debug"
 $AgentPanelDev = $false
 $AgentPanelDevUrl = $null
+$BuildPresetExplicit = $false
+$ConfigurePresetExplicit = $false
 
 for ($i = 0; $i -lt $args.Count; $i++) {
     $arg = $args[$i]
@@ -76,12 +78,14 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "^--build-preset$" {
             if ($i + 1 -ge $args.Count) { Err "Missing value after --build-preset"; exit 1 }
             $BuildPreset = $args[$i + 1]
+            $BuildPresetExplicit = $true
             $i++
             continue
         }
         "^--configure-preset$" {
             if ($i + 1 -ge $args.Count) { Err "Missing value after --configure-preset"; exit 1 }
             $ConfigurePreset = $args[$i + 1]
+            $ConfigurePresetExplicit = $true
             $i++
             continue
         }
@@ -95,10 +99,6 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         default { Err "Unknown option: $arg"; exit 1 }
     }
 }
-
-Info "Repository root: $RepoRoot"
-Info "Configure preset: $ConfigurePreset"
-Info "Build preset: $BuildPreset"
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     Err "CMake is not installed or not on PATH."
@@ -115,6 +115,52 @@ if (-not (Test-Path $PresetsPath)) {
     }
     exit 1
 }
+
+function Resolve-ConfigurePresetFromBuildPreset([string]$BuildPresetName) {
+    $presetJson = Get-Content -Raw -Path $PresetsPath | ConvertFrom-Json
+    $buildPreset = $presetJson.buildPresets | Where-Object { $_.name -eq $BuildPresetName } | Select-Object -First 1
+    if (-not $buildPreset) {
+        return $null
+    }
+    if ($buildPreset.PSObject.Properties.Name -contains "configurePreset") {
+        return $buildPreset.configurePreset
+    }
+    return $null
+}
+
+function Resolve-BuildPresetFromConfigurePreset([string]$ConfigurePresetName) {
+    $presetJson = Get-Content -Raw -Path $PresetsPath | ConvertFrom-Json
+    $buildPreset = $presetJson.buildPresets | Where-Object { $_.configurePreset -eq $ConfigurePresetName } | Select-Object -First 1
+    if (-not $buildPreset) {
+        return $null
+    }
+    return $buildPreset.name
+}
+
+if ($BuildPresetExplicit -and -not $ConfigurePresetExplicit) {
+    $mappedConfigurePreset = Resolve-ConfigurePresetFromBuildPreset $BuildPreset
+    if ($mappedConfigurePreset) {
+        $ConfigurePreset = $mappedConfigurePreset
+    } else {
+        Warn "Build preset '$BuildPreset' not found; using configure preset '$ConfigurePreset'."
+    }
+} elseif ($ConfigurePresetExplicit -and -not $BuildPresetExplicit) {
+    $mappedBuildPreset = Resolve-BuildPresetFromConfigurePreset $ConfigurePreset
+    if ($mappedBuildPreset) {
+        $BuildPreset = $mappedBuildPreset
+    } else {
+        Warn "Configure preset '$ConfigurePreset' has no matching build preset; using build preset '$BuildPreset'."
+    }
+} elseif ($BuildPresetExplicit -and $ConfigurePresetExplicit) {
+    $mappedConfigurePreset = Resolve-ConfigurePresetFromBuildPreset $BuildPreset
+    if ($mappedConfigurePreset -and ($mappedConfigurePreset -ne $ConfigurePreset)) {
+        Warn "Build preset '$BuildPreset' expects configure preset '$mappedConfigurePreset', but '$ConfigurePreset' was provided."
+    }
+}
+
+Info "Repository root: $RepoRoot"
+Info "Configure preset: $ConfigurePreset"
+Info "Build preset: $BuildPreset"
 
 function Resolve-BuildDir([string]$PresetName) {
     $presetJson = Get-Content -Raw -Path $PresetsPath | ConvertFrom-Json
@@ -135,6 +181,100 @@ function Resolve-BuildDir([string]$PresetName) {
         return $binaryDir
     }
     return (Join-Path $RepoRoot $binaryDir)
+}
+
+function Find-DllInPath([string]$DllName) {
+    $pathEntries = ($env:PATH -split ';') | Where-Object { $_ -and ($_ -ne '.') }
+    foreach ($entry in $pathEntries) {
+        $trimmed = $entry.Trim()
+        if (-not $trimmed) { continue }
+        $candidate = Join-Path $trimmed $DllName
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Prepend-PathEntry([string]$Entry) {
+    if (-not $Entry) { return }
+    if (-not (Test-Path $Entry)) { return }
+    $current = $env:PATH -split ';'
+    if ($current -contains $Entry) { return }
+    $env:PATH = ($Entry + ";" + $env:PATH)
+}
+
+function Set-KicadRunPaths([string]$BuildDir, [bool]$IsDebug) {
+    $runtimeDirs = @(
+        (Join-Path $BuildDir "kicad"),
+        (Join-Path $BuildDir "common"),
+        (Join-Path $BuildDir "api"),
+        (Join-Path $BuildDir "common\gal"),
+        (Join-Path $BuildDir "pcbnew"),
+        (Join-Path $BuildDir "eeschema"),
+        (Join-Path $BuildDir "cvpcb")
+    )
+
+    $vcpkgRoot = Join-Path $BuildDir "vcpkg_installed\x64-windows"
+    $vcpkgBin = if ($IsDebug) { Join-Path $vcpkgRoot "debug\bin" } else { Join-Path $vcpkgRoot "bin" }
+
+    # Ensure build output and vcpkg bins are on PATH for DLL resolution.
+    if (Test-Path $vcpkgBin) {
+        Prepend-PathEntry $vcpkgBin
+    }
+    foreach ($dir in $runtimeDirs) {
+        Prepend-PathEntry $dir
+    }
+
+    $existing = @()
+    foreach ($dir in $runtimeDirs) {
+        if (Test-Path $dir) { $existing += $dir }
+    }
+    $env:KICAD_BUILD_PATHS = ($existing -join ":")
+}
+
+function Add-PythonPathEntry([string]$Entry) {
+    if (-not $Entry) { return }
+    if (-not (Test-Path $Entry)) { return }
+    $separator = ";"
+    $current = @()
+    if ($env:PYTHONPATH) {
+        $current = $env:PYTHONPATH -split $separator
+    }
+    if ($current -contains $Entry) { return }
+    if ($env:PYTHONPATH) {
+        $env:PYTHONPATH = $Entry + $separator + $env:PYTHONPATH
+    } else {
+        $env:PYTHONPATH = $Entry
+    }
+}
+
+function Ensure-KicadPythonEnv([string]$BuildDir) {
+    $internalEncodings = Join-Path $BuildDir "kicad\\Lib\\encodings"
+    if (Test-Path $internalEncodings) {
+        return
+    }
+
+    if ($env:KICAD_USE_EXTERNAL_PYTHONHOME) {
+        return
+    }
+
+    $vcpkgPythonHome = Join-Path $BuildDir "vcpkg_installed\\x64-windows\\tools\\python3"
+    $vcpkgEncodings = Join-Path $vcpkgPythonHome "Lib\\encodings"
+    if (-not (Test-Path $vcpkgEncodings)) {
+        Warn "Python stdlib not found at $internalEncodings and vcpkg python not found at $vcpkgPythonHome."
+        return
+    }
+
+    $env:KICAD_USE_EXTERNAL_PYTHONHOME = "1"
+    if (-not $env:PYTHONHOME) {
+        $env:PYTHONHOME = $vcpkgPythonHome
+    }
+
+    Add-PythonPathEntry (Join-Path $BuildDir "pcbnew")
+    Add-PythonPathEntry (Join-Path $BuildDir "scripting")
+
+    Info "Using external Python home: $($env:PYTHONHOME)"
 }
 
 $BuildDir = Resolve-BuildDir $ConfigurePreset
@@ -181,7 +321,21 @@ if ($Action -ne "build") {
         Err "kicad.exe not found in build output. Checked: $($exeCandidates -join ', ')"
         exit 1
     }
+    $isDebugPreset = ($BuildPreset -match "debug") -or ($ConfigurePreset -match "debug")
+    if ($isDebugPreset) {
+        $missingDlls = @()
+        foreach ($dll in @("MSVCP140D.dll", "VCRUNTIME140D.dll", "VCRUNTIME140_1D.dll", "ucrtbased.dll")) {
+            if (-not (Find-DllInPath $dll)) { $missingDlls += $dll }
+        }
+        if ($missingDlls.Count -gt 0) {
+            Err ("Debug CRT not found on PATH: " + ($missingDlls -join ", "))
+            Warn "Install VS Build Tools (Desktop development with C++) or use --configure-preset msvc-win64-release --build-preset win64-release."
+            exit 1
+        }
+    }
     $env:KICAD_RUN_FROM_BUILD_DIR = "1"
+    Set-KicadRunPaths -BuildDir $BuildDir -IsDebug $isDebugPreset
+    Ensure-KicadPythonEnv -BuildDir $BuildDir
 
     if ($AgentPanelDevUrl) {
         $env:KICAD_AGENT_PANEL_DEV_URL = $AgentPanelDevUrl
