@@ -2475,6 +2475,9 @@ const BOX2I SCH_EDIT_FRAME::GetDocumentExtents( bool aIncludeAllVisible ) const
 
 bool SCH_EDIT_FRAME::IsContentModified() const
 {
+    if( !Schematic().HasHierarchy() )
+        return false;
+
     return Schematic().Hierarchy().IsModified();
 }
 
