@@ -238,6 +238,7 @@ public:
     {
         bool automatic;
         bool recursive;
+        bool regroup_units;
         int scope;
         int options;
         int messages_filter;
