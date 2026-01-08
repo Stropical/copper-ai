@@ -338,6 +338,14 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
                     if( rootSheet )
                     {
+                        // Validate the loaded sheet has a valid UUID (not niluuid)
+                        // This prevents infinite recursion in SetTopLevelSheets if the UUID is invalid
+                        if( rootSheet->m_Uuid == niluuid )
+                        {
+                            // Generate a new UUID if the loaded sheet has niluuid
+                            const_cast<KIID&>( rootSheet->m_Uuid ) = KIID();
+                        }
+                        
                         newSchematic->SetTopLevelSheets( { rootSheet } );
 
                         // Make ${SHEETNAME} work on the root sheet until we properly support

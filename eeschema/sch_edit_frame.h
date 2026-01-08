@@ -1104,7 +1104,7 @@ private:
     std::vector<LIB_ID>         m_designBlockHistoryList;
     SCH_DESIGN_BLOCK_PANE*      m_designBlocksPane;
     PANEL_REMOTE_SYMBOL*        m_remoteSymbolPane;
-    WEBVIEW_PANEL*              m_ollamaAgentPane;
+    wxWindow*                   m_ollamaAgentPane;  // Can be wxPanel (placeholder) or WEBVIEW_PANEL
 
     wxChoice*                   m_currentVariantCtrl;
 

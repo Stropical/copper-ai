@@ -280,10 +280,29 @@ void SCHEMATIC::ensureDefaultTopLevelSheet()
     SCH_SHEET*  rootSheet = new SCH_SHEET( this );
     SCH_SCREEN* rootScreen = new SCH_SCREEN( this );
 
-    const_cast<KIID&>( rootSheet->m_Uuid ) = rootScreen->GetUuid();
+    KIID screenUuid = rootScreen->GetUuid();
+    
+    // Ensure the UUID is valid (not niluuid) to prevent infinite recursion in SetTopLevelSheets
+    // If the screen UUID is niluuid, generate a new UUID
+    if( screenUuid == niluuid )
+        screenUuid = KIID();
+    
+    const_cast<KIID&>( rootSheet->m_Uuid ) = screenUuid;
     rootSheet->SetScreen( rootScreen );
 
-    SetTopLevelSheets( { rootSheet } );
+    // Avoid calling SetTopLevelSheets() which can cause infinite recursion.
+    // Instead, directly set up the top-level sheet similar to what SetTopLevelSheets does
+    rootSheet->SetParent( m_rootSheet );
+    
+    if( m_rootSheet->GetScreen() )
+        m_rootSheet->GetScreen()->Append( rootSheet );
+    
+    m_currentSheet->clear();
+    m_topLevelSheets.clear();
+    m_topLevelSheets.push_back( rootSheet );
+    
+    ensureCurrentSheetIsTopLevel();
+    rebuildHierarchyState( true );
 
     SCH_SHEET_PATH rootSheetPath;
     rootSheetPath.push_back( m_rootSheet );
