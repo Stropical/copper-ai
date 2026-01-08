@@ -42,6 +42,7 @@
 #include <eeschema_settings.h>
 #include <math/box2.h>
 #include <sch_base_frame.h>
+#include <sch_io/sch_io_mgr.h>
 #include <template_fieldnames.h>
 
 class SCH_ITEM;
@@ -996,6 +997,22 @@ private:
      */
     bool importFile( const wxString& aFileName, int aFileType,
                      const std::map<std::string, UTF8>* aProperties = nullptr );
+
+    /**
+     * Replace the current schematic in RAM with a new schematic loaded from a file.
+     * This function uses SCH_COMMIT to properly stage and apply all changes, ensuring
+     * undo/redo, connectivity, and UI updates are handled correctly.
+     *
+     * @param aFileName is the full path to the schematic file to load
+     * @param aFileType is the SCH_IO_MGR::SCH_FILE_T file type (use SCH_FILE_UNKNOWN to auto-detect)
+     * @param aCommitFlags are flags to pass to commit.Push() (e.g., SKIP_UNDO, SKIP_SET_DIRTY)
+     * @param aErrorMsg is an optional output parameter to receive error messages
+     * @return true if the schematic was successfully replaced, false on error
+     */
+    bool ReplaceSchematicInRAM( const wxString& aFileName,
+                                SCH_IO_MGR::SCH_FILE_T aFileType = SCH_IO_MGR::SCH_FILE_UNKNOWN,
+                                int aCommitFlags = 0,
+                                wxString* aErrorMsg = nullptr );
 
     /**
      * Save \a aSheet to a schematic file.

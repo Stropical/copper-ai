@@ -57,6 +57,13 @@
 #include <core/profile.h>
 #include <project/project_file.h>
 #include <project/net_settings.h>
+#include <project/project_archiver.h>
+#include <reporter.h>
+#include <wx/mstream.h>
+#include <wx/base64.h>
+#include <wx/zipstrm.h>
+#include <wx/dir.h>
+#include <wx/wfstream.h>
 #include <python_scripting.h>
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
@@ -87,6 +94,7 @@
 #include <tools/sch_design_block_control.h>
 #include <sch_io/sch_io_mgr.h>
 #include <sch_io/sch_io.h>
+#include <ki_exception.h>
 #include <tools/sch_drawing_tools.h>
 #include <tools/sch_edit_tool.h>
 #include <tools/sch_edit_table_tool.h>
@@ -388,6 +396,140 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                             response["status"] = "OK";
                             response["data"] = context.ToUTF8().data();
                         }
+                        else if( command == "GET_PROJECT_PATH" )
+                        {
+                            wxString projectPath;
+
+                            // Check if project is loaded (not null project)
+                            if( Prj().IsNullProject() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "No project is currently open";
+                            }
+                            else
+                            {
+                                projectPath = Prj().GetProjectPath();
+                                
+                                if( projectPath.IsEmpty() )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = "Project path is empty";
+                                }
+                                else
+                                {
+                                    response["status"] = "OK";
+                                    response["data"] = projectPath.ToUTF8().data();
+                                }
+                            }
+                        }
+                        else if( command == "ZIP_PROJECT" )
+                        {
+                            // Check if project is loaded (not null project)
+                            if( Prj().IsNullProject() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "No project is currently open";
+                            }
+                            else
+                            {
+                                wxString projectPath = Prj().GetProjectPath();
+                                
+                                if( projectPath.IsEmpty() )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = "Project path is empty";
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        // Create zip in memory
+                                        wxMemoryOutputStream memStream;
+                                        wxZipOutputStream zipStream( memStream, -1, wxConvUTF8 );
+                                        
+                                        // Get all project files
+                                        wxDir projectDir( projectPath );
+                                        
+                                        if( !projectDir.IsOpened() )
+                                        {
+                                            response["status"] = "ERROR";
+                                            response["error_message"] = "Failed to open project directory";
+                                        }
+                                        else
+                                        {
+                                            wxString filename;
+                                            bool cont = projectDir.GetFirst( &filename, wxEmptyString, wxDIR_FILES | wxDIR_DIRS );
+                                            
+                                            while( cont )
+                                            {
+                                                wxString filePath = projectPath + wxFileName::GetPathSeparator() + filename;
+                                                wxFileName fn( filePath );
+                                                
+                                                // Skip hidden files and directories
+                                                if( filename.StartsWith( "." ) )
+                                                {
+                                                    cont = projectDir.GetNext( &filename );
+                                                    continue;
+                                                }
+                                                
+                                                if( fn.IsDir() )
+                                                {
+                                                    // Skip certain directories
+                                                    if( filename != "3d" && filename != "cache" )
+                                                    {
+                                                        cont = projectDir.GetNext( &filename );
+                                                        continue;
+                                                    }
+                                                }
+                                                
+                                                // Check if it's a file (not a directory)
+                                                if( !fn.IsDir() && wxFileName::FileExists( filePath ) )
+                                                {
+                                                    // Make path relative to project directory
+                                                    fn.MakeRelativeTo( projectPath );
+                                                    wxString relativePath = fn.GetFullPath();
+                                                    
+                                                    // Add file to zip
+                                                    wxFileInputStream fileStream( filePath );
+                                                    
+                                                    if( fileStream.IsOk() )
+                                                    {
+                                                        zipStream.PutNextEntry( relativePath, fn.GetModificationTime() );
+                                                        zipStream.Write( fileStream );
+                                                        zipStream.CloseEntry();
+                                                    }
+                                                }
+                                                
+                                                cont = projectDir.GetNext( &filename );
+                                            }
+                                            
+                                            zipStream.Close();
+                                            
+                                            // Get the zip data
+                                            size_t zipSize = memStream.GetSize();
+                                            wxMemoryBuffer zipBuffer( zipSize );
+                                            memStream.CopyTo( zipBuffer.GetData(), zipSize );
+                                            
+                                            // Encode to base64
+                                            wxString base64Zip = wxBase64Encode( zipBuffer.GetData(), zipSize );
+                                            
+                                            response["status"] = "OK";
+                                            response["data"] = base64Zip.ToUTF8().data();
+                                        }
+                                    }
+                                    catch( const std::exception& e )
+                                    {
+                                        response["status"] = "ERROR";
+                                        response["error_message"] = std::string( "Failed to create zip: " ) + e.what();
+                                    }
+                                    catch( ... )
+                                    {
+                                        response["status"] = "ERROR";
+                                        response["error_message"] = "Failed to create zip: Unknown error";
+                                    }
+                                }
+                            }
+                        }
                         else if( command == "RUN_TOOL" )
                         {
                             std::string toolName;
@@ -444,6 +586,88 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                                 response["status"] = ok ? "OK" : "ERROR";
                                 if( !ok && response.find( "error_message" ) == response.end() )
                                     response["error_message"] = "Tool execution failed";
+                            }
+                        }
+                        else if( command == "REPLACE_SCHEMATIC" )
+                        {
+                            wxString filePath;
+                            int commitFlags = 0;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "file_path" ) && params["file_path"].is_string() )
+                                    filePath = wxString::FromUTF8( params["file_path"].get<std::string>().c_str() );
+                                
+                                if( params.contains( "skip_undo" ) && params["skip_undo"].is_boolean() 
+                                    && params["skip_undo"].get<bool>() )
+                                    commitFlags |= SKIP_UNDO;
+                                
+                                if( params.contains( "skip_set_dirty" ) && params["skip_set_dirty"].is_boolean() 
+                                    && params["skip_set_dirty"].get<bool>() )
+                                    commitFlags |= SKIP_SET_DIRTY;
+                            }
+
+                            if( filePath.IsEmpty() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Missing parameters.file_path";
+                            }
+                            else
+                            {
+                                // Make path absolute if it's relative
+                                wxFileName fn( filePath );
+                                if( !fn.IsAbsolute() )
+                                {
+                                    // Try to make it relative to project path if available
+                                    if( !Prj().IsNullProject() && !Prj().GetProjectPath().IsEmpty() )
+                                    {
+                                        fn.MakeAbsolute( Prj().GetProjectPath() );
+                                        filePath = fn.GetFullPath();
+                                    }
+                                    else
+                                    {
+                                        fn.MakeAbsolute();
+                                        filePath = fn.GetFullPath();
+                                    }
+                                }
+
+                                // Check if file exists
+                                if( !wxFileName::FileExists( filePath ) )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = wxString::Format( 
+                                        _( "File does not exist: %s" ), filePath ).ToUTF8().data();
+                                }
+                                else
+                                {
+                                    // Call ReplaceSchematicInRAM with error handling
+                                    wxString errorMsg;
+                                    bool success = ReplaceSchematicInRAM( filePath, 
+                                                                          SCH_IO_MGR::SCH_FILE_UNKNOWN, 
+                                                                          commitFlags,
+                                                                          &errorMsg );
+                                    
+                                    if( success )
+                                    {
+                                        response["status"] = "OK";
+                                        response["data"] = wxString::Format( 
+                                            _( "Schematic replaced successfully from: %s" ), filePath ).ToUTF8().data();
+                                    }
+                                    else
+                                    {
+                                        response["status"] = "ERROR";
+                                        if( !errorMsg.IsEmpty() )
+                                        {
+                                            response["error_message"] = errorMsg.ToUTF8().data();
+                                        }
+                                        else
+                                        {
+                                            response["error_message"] = wxString::Format( 
+                                                _( "Failed to replace schematic from: %s" ), filePath ).ToUTF8().data();
+                                        }
+                                    }
+                                }
                             }
                         }
                         else if( command == "UNDO" )

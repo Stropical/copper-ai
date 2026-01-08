@@ -44,7 +44,7 @@ static const wxChar* traceGalDispOpts = wxT( "KICAD_GAL_DISPLAY_OPTIONS" );
 
 
 GAL_DISPLAY_OPTIONS::GAL_DISPLAY_OPTIONS()
-    : antialiasing_mode( GAL_ANTIALIASING_MODE::AA_NONE ),
+    : antialiasing_mode( GAL_ANTIALIASING_MODE::AA_HIGHQUALITY ),
       m_gridStyle( GRID_STYLE::DOTS ),
       m_gridSnapping( GRID_SNAPPING::ALWAYS ),
       m_gridLineWidth( 1.0 ),

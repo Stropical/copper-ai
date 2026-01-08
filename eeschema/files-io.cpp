@@ -54,6 +54,7 @@
 #include <sch_commit.h>
 #include <sch_edit_frame.h>
 #include <sch_io/kicad_legacy/sch_io_kicad_legacy.h>
+#include <sch_io/sch_io_mgr.h>
 #include <sch_file_versions.h>
 #include <sch_line.h>
 #include <sch_sheet.h>
@@ -1593,6 +1594,276 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
     }
 
     return true;
+}
+
+
+bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
+                                             SCH_IO_MGR::SCH_FILE_T aFileType,
+                                             int aCommitFlags,
+                                             wxString* aErrorMsg )
+{
+    wxFileName filename( aFileName );
+    
+    // Ensure we have an absolute path
+    if( !filename.IsAbsolute() )
+    {
+        wxString errorMsg = wxString::Format( _( "Path must be absolute: %s" ), aFileName );
+        wxLogError( _( "ReplaceSchematicInRAM: path must be absolute: %s" ), aFileName );
+        if( aErrorMsg )
+            *aErrorMsg = errorMsg;
+        return false;
+    }
+    
+    // Check if file exists and is readable
+    if( !filename.FileExists() || !filename.IsFileReadable() )
+    {
+        wxString errorMsg = wxString::Format( _( "File does not exist or is not readable: %s" ),
+                                             aFileName );
+        wxLogError( _( "ReplaceSchematicInRAM: file does not exist or is not readable: %s" ),
+                    aFileName );
+        if( aErrorMsg )
+            *aErrorMsg = errorMsg;
+        return false;
+    }
+    
+    // Auto-detect file type if not specified
+    SCH_IO_MGR::SCH_FILE_T fileType = aFileType;
+    if( fileType == SCH_IO_MGR::SCH_FILE_UNKNOWN )
+    {
+        fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( aFileName, KICTL_KICAD_ONLY );
+        
+        if( fileType == SCH_IO_MGR::SCH_FILE_UNKNOWN )
+        {
+            // Try to find a plugin that can read this file
+            for( const SCH_IO_MGR::SCH_FILE_T& type : SCH_IO_MGR::SCH_FILE_T_vector )
+            {
+                IO_RELEASER<SCH_IO> pi( SCH_IO_MGR::FindPlugin( type ) );
+                
+                if( !pi )
+                    continue;
+                
+                if( pi->CanReadSchematicFile( aFileName ) )
+                {
+                    fileType = type;
+                    break;
+                }
+            }
+            
+            if( fileType == SCH_IO_MGR::SCH_FILE_UNKNOWN )
+            {
+                wxString errorMsg = wxString::Format( _( "No plugin can read file: %s" ), aFileName );
+                wxLogError( _( "ReplaceSchematicInRAM: no plugin can read file: %s" ), aFileName );
+                if( aErrorMsg )
+                    *aErrorMsg = errorMsg;
+                return false;
+            }
+        }
+    }
+    
+    // Get current screen and schematic
+    SCH_SCREEN* currentScreen = GetScreen();
+    SCHEMATIC* schematic = &Schematic();
+    
+    if( !currentScreen || !schematic )
+    {
+        wxString errorMsg = _( "No current schematic loaded" );
+        wxLogError( _( "ReplaceSchematicInRAM: no current schematic loaded" ) );
+        if( aErrorMsg )
+            *aErrorMsg = errorMsg;
+        return false;
+    }
+    
+    // Create commit object
+    SCH_COMMIT commit( this );
+    
+    // Step 1: Collect all existing items to remove (excluding sheet pins and fields)
+    std::vector<SCH_ITEM*> itemsToRemove;
+    for( SCH_ITEM* item : currentScreen->Items() )
+    {
+        // Skip sheet pins and fields as they're managed by their parents
+        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+        {
+            itemsToRemove.push_back( item );
+        }
+    }
+    
+    // Step 2: Stage all removals
+    for( SCH_ITEM* item : itemsToRemove )
+    {
+        commit.Remove( item, currentScreen );
+    }
+    
+    // Step 3: Load the new schematic file into a temporary schematic
+    try
+    {
+        IO_RELEASER<SCH_IO> io( SCH_IO_MGR::FindPlugin( fileType ) );
+        
+        if( !io )
+        {
+            wxLogError( _( "ReplaceSchematicInRAM: failed to get IO plugin for file type" ) );
+            return false;
+        }
+        
+        // Create a temporary schematic to load into
+        SCHEMATIC tempSchematic( &Prj() );
+        tempSchematic.CreateDefaultScreens();
+        
+        // Load the new schematic file
+        SCH_SHEET* newRootSheet = nullptr;
+        wxString lastError;
+        try
+        {
+            newRootSheet = io->LoadSchematicFile( aFileName, &tempSchematic );
+        }
+        catch( const IO_ERROR& ioe )
+        {
+            lastError = ioe.What();
+            wxString errorMsg = wxString::Format( _( "ReplaceSchematicInRAM: IO error loading '%s': %s" ),
+                                                  aFileName, lastError );
+            wxLogError( errorMsg );
+            if( aErrorMsg )
+                *aErrorMsg = lastError;
+            return false;
+        }
+        catch( const std::exception& exc )
+        {
+            lastError = wxString( exc.what() );
+            wxString errorMsg = wxString::Format( _( "ReplaceSchematicInRAM: error loading '%s': %s" ),
+                                                  aFileName, lastError );
+            wxLogError( errorMsg );
+            if( aErrorMsg )
+                *aErrorMsg = lastError;
+            return false;
+        }
+        
+        if( !newRootSheet )
+        {
+            wxString errorMsg = _( "ReplaceSchematicInRAM: failed to load schematic file" );
+            wxLogError( _( "ReplaceSchematicInRAM: failed to load schematic file: %s" ),
+                        aFileName );
+            if( aErrorMsg )
+                *aErrorMsg = errorMsg;
+            return false;
+        }
+        
+        tempSchematic.SetTopLevelSheets( { newRootSheet } );
+        
+        // Step 4: Get all items from the new schematic's root screen
+        SCH_SCREEN* newScreen = newRootSheet->GetScreen();
+        
+        if( !newScreen )
+        {
+            wxString errorMsg = _( "Loaded schematic has no screen" );
+            wxLogError( _( "ReplaceSchematicInRAM: loaded schematic has no screen" ) );
+            if( aErrorMsg )
+                *aErrorMsg = errorMsg;
+            return false;
+        }
+        
+        // Standard KiCad loading already handles lib_symbols via UpdateSymbolLinks().
+        // Since the server applies patches and creates a complete valid file, we can trust
+        // that the standard loading mechanism has properly linked all symbols.
+        // Just ensure UpdateSymbolLinks() was called (it should be called by LoadSchematicFile).
+        newScreen->UpdateSymbolLinks( nullptr ); // Ensure symbols are linked from libraries
+        
+        // Verify symbols now have lib_symbols
+        for( SCH_ITEM* item : newScreen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+            bool hasLibSymbol = symbol->GetLibSymbolRef().get() != nullptr;
+            wxLogMessage( _( "ReplaceSchematicInRAM: New screen symbol ref=%s, hasLibSymbol=%d" ),
+                         symbol->GetField( FIELD_T::REFERENCE )->GetText(),
+                         hasLibSymbol ? 1 : 0 );
+        }
+        
+        // Step 4: Copy lib_symbols from new screen to current screen
+        // Standard KiCad loading already populated newScreen->GetLibSymbols() via UpdateSymbolLinks().
+        // We just need to copy them to the current screen so UpdateLocalLibSymbolLinks() can find them.
+        std::map<wxString, LIB_SYMBOL*>& currentLibSymbolsMap = 
+            const_cast<std::map<wxString, LIB_SYMBOL*>&>( currentScreen->GetLibSymbols() );
+        
+        for( const auto& [ key, libSymbol ] : newScreen->GetLibSymbols() )
+        {
+            if( currentLibSymbolsMap.find( key ) == currentLibSymbolsMap.end() )
+            {
+                currentLibSymbolsMap[key] = new LIB_SYMBOL( *libSymbol );
+            }
+        }
+        
+        // Step 5: Clone all items from new screen to current screen
+        std::vector<SCH_ITEM*> itemsToAdd;
+        for( SCH_ITEM* item : newScreen->Items() )
+        {
+            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+            {
+                SCH_ITEM* clonedItem = static_cast<SCH_ITEM*>( item->Clone() );
+                itemsToAdd.push_back( clonedItem );
+            }
+        }
+        
+        // Step 6: Stage all additions
+        for( SCH_ITEM* item : itemsToAdd )
+        {
+            commit.Add( item, currentScreen );
+        }
+        
+        // Step 7: Push the commit to apply all changes
+        commit.Push( _( "Replace Schematic" ), aCommitFlags );
+        
+        // Step 8: Update local lib symbol links (uses the map we just populated)
+        currentScreen->UpdateLocalLibSymbolLinks();
+        
+        // Step 7: Update the schematic hierarchy and connectivity
+        schematic->RefreshHierarchy();
+        
+        // Recalculate connections with global cleanup since we replaced everything
+        RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+        
+        // Update sheet references
+        GetCurrentSheet().UpdateAllScreenReferences();
+        
+        // Refresh the canvas
+        GetCanvas()->Refresh();
+        
+        // Update hierarchy navigator
+        UpdateHierarchyNavigator( false, true );
+        
+        // Post schematic changed event
+        wxCommandEvent e( EDA_EVT_SCHEMATIC_CHANGED );
+        ProcessEventLocally( e );
+        
+        for( wxEvtHandler* listener : m_schematicChangeListeners )
+        {
+            wxCHECK2( listener, continue );
+            
+            wxWindow* win = dynamic_cast<wxWindow*>( listener );
+            
+            if( win )
+                win->HandleWindowEvent( e );
+            else
+                listener->SafelyProcessEvent( e );
+        }
+        
+        return true;
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        wxString errorMsg = ioe.What();
+        wxLogError( _( "ReplaceSchematicInRAM: IO error loading '%s': %s" ),
+                    aFileName, errorMsg );
+        if( aErrorMsg )
+            *aErrorMsg = errorMsg;
+        return false;
+    }
+    catch( const std::exception& exc )
+    {
+        wxString errorMsg = wxString( exc.what() );
+        wxLogError( _( "ReplaceSchematicInRAM: exception loading '%s': %s" ),
+                    aFileName, errorMsg );
+        if( aErrorMsg )
+            *aErrorMsg = errorMsg;
+        return false;
+    }
 }
 
 

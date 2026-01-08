@@ -67,9 +67,11 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
 
         {/* Tool name and args */}
         <div className="flex-1 min-w-0">
-          <span className="font-mono text-[#E7E9EC]">{toolCall.name}</span>
+          <div className="font-mono text-[#E7E9EC]">{toolCall.name}</div>
           {argsSummary && (
-            <span className="text-[#9AA3AD] ml-2">{argsSummary}</span>
+            <div className="text-[#9AA3AD] mt-1 text-[10px] leading-[1.5] whitespace-pre-wrap break-words">
+              {argsSummary}
+            </div>
           )}
         </div>
 

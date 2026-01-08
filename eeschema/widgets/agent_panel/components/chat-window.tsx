@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToolCallComponent, ToolCall } from "@/components/tool-call"
 import { Send, User, Bot, Sparkles, Check, X } from "lucide-react"
 import { Streamdown } from "streamdown"
+import JSZip from "jszip"
 
 interface Message {
   id: string
@@ -22,14 +23,18 @@ interface Message {
 }
 
 const MODELS = [
+  { value: "codex-5.1", label: "Codex 5.1" },
   { value: "google/gemma-3-27b-it:free", label: "Gemma 3 27B IT (Google)" },
   { value: "openai/gpt-oss-120b:free", label: "GPT-OSS 120B (OpenAI)" },
   { value: "qwen/qwen3-coder:free", label: "Qwen3 Coder (Qwen)"},
   { value: "meta-llama/llama-3.1-405b-instruct:free", label: "Llama 3.1 405B Instruct (Meta)"}
 ]
 
-const AGENT_API_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001/api/generate"
-const AGENT_BASE_URL = AGENT_API_URL.replace(/\/api\/generate\/?$/, "")
+// Use agent_v3 by default, fallback to agent_v2
+const AGENT_V3_URL = process.env.NEXT_PUBLIC_AGENT_V3_URL || "http://127.0.0.1:5002"
+const AGENT_V2_URL = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://127.0.0.1:5001"
+const AGENT_API_URL = `${AGENT_V3_URL}/api/generate` // Use v3 by default
+const AGENT_BASE_URL = AGENT_V2_URL.replace(/\/api\/generate\/?$/, "") // For v2 compatibility
 
 // Serial tool mode: execute one tool call at a time, then let the model continue.
 const SERIAL_TOOL_MODE = false
@@ -46,12 +51,26 @@ export function ChatWindow() {
   const [input, setInput] = React.useState("")
   const [isLoading, setIsLoading] = React.useState(false)
   const [queuedPrompt, setQueuedPrompt] = React.useState<string | null>(null)
-  const [selectedModel, setSelectedModel] = React.useState("google/gemma-3-4b")
-  const [sessionId] = React.useState(() => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
+  const [selectedModel, setSelectedModel] = React.useState("codex-5.1")
+  const [sessionId] = React.useState(() => {
+    // Try to get session ID from localStorage or generate new one
+    if (typeof window === "undefined") {
+      // SSR: return a temporary ID, will be replaced on client
+      return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    }
+    const stored = localStorage.getItem("kicad_agent_session_id")
+    if (stored) return stored
+    const newId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    localStorage.setItem("kicad_agent_session_id", newId)
+    return newId
+  })
   const [authRequired, setAuthRequired] = React.useState<{
     loginUrl?: string
     tokenPageUrl?: string
   } | null>(null)
+  const [authToken, setAuthToken] = React.useState<string | null>(null)
+  const [debugLogs, setDebugLogs] = React.useState<Array<{ time: string; level: string; message: string }>>([])
+  const [showDebugConsole, setShowDebugConsole] = React.useState(false)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const queuedPromptRef = React.useRef<string | null>(null)
   const queuedAutoPromptRef = React.useRef<string | null>(null)
@@ -84,6 +103,214 @@ export function ChatWindow() {
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [stopStreaming])
+
+  // Debug logging helper (directly adds to logs without going through console to avoid recursion)
+  const addDebugLog = React.useCallback((level: string, message: string) => {
+    const time = new Date().toLocaleTimeString()
+    setDebugLogs((prev) => [...prev.slice(-49), { time, level, message }]) // Keep last 50 logs
+    // Don't call console methods here to avoid recursion
+  }, [])
+
+  // Intercept console methods (with recursion guard)
+  React.useEffect(() => {
+    let isIntercepting = false
+    const originalLog = console.log
+    const originalError = console.error
+    const originalWarn = console.warn
+
+    console.log = (...args: any[]) => {
+      originalLog(...args)
+      if (!isIntercepting) {
+        isIntercepting = true
+        try {
+          const message = args.map(a => {
+            if (typeof a === "object") {
+              try {
+                return JSON.stringify(a)
+              } catch {
+                return String(a)
+              }
+            }
+            return String(a)
+          }).join(" ")
+          const time = new Date().toLocaleTimeString()
+          setDebugLogs((prev) => [...prev.slice(-49), { time, level: "log", message }])
+        } finally {
+          isIntercepting = false
+        }
+      }
+    }
+
+    console.error = (...args: any[]) => {
+      originalError(...args)
+      if (!isIntercepting) {
+        isIntercepting = true
+        try {
+          const message = args.map(a => {
+            if (typeof a === "object") {
+              try {
+                return JSON.stringify(a)
+              } catch {
+                return String(a)
+              }
+            }
+            return String(a)
+          }).join(" ")
+          const time = new Date().toLocaleTimeString()
+          setDebugLogs((prev) => [...prev.slice(-49), { time, level: "error", message }])
+        } finally {
+          isIntercepting = false
+        }
+      }
+    }
+
+    console.warn = (...args: any[]) => {
+      originalWarn(...args)
+      if (!isIntercepting) {
+        isIntercepting = true
+        try {
+          const message = args.map(a => {
+            if (typeof a === "object") {
+              try {
+                return JSON.stringify(a)
+              } catch {
+                return String(a)
+              }
+            }
+            return String(a)
+          }).join(" ")
+          const time = new Date().toLocaleTimeString()
+          setDebugLogs((prev) => [...prev.slice(-49), { time, level: "warn", message }])
+        } finally {
+          isIntercepting = false
+        }
+      }
+    }
+
+    return () => {
+      console.log = originalLog
+      console.error = originalError
+      console.warn = originalWarn
+    }
+  }, [])
+
+  // Validate auth token on mount
+  React.useEffect(() => {
+    const validateAuth = async () => {
+      if (typeof window === "undefined") return
+      const storedToken = localStorage.getItem("copper_auth_token")
+      if (!storedToken) {
+        addDebugLog("warn", "No auth token found")
+        setAuthRequired({
+          tokenPageUrl: "https://portal.copper.ai/token",
+        })
+        return
+      }
+
+      setAuthToken(storedToken)
+      addDebugLog("log", "Auth token found, validating...")
+
+      // Try to validate token by making a lightweight test request
+      // Use a timeout to avoid blocking the UI
+      try {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 3000) // 3 second timeout
+
+        const testResp = await fetch(`${AGENT_BASE_URL}/api/generate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${storedToken}`,
+          },
+          body: JSON.stringify({
+            model: "google/gemma-3-27b-it:free",
+            prompt: "test",
+            stream: false,
+          }),
+          signal: controller.signal,
+        })
+
+        clearTimeout(timeoutId)
+
+        if (testResp.status === 401) {
+          addDebugLog("error", "Auth token is invalid or expired")
+          setAuthRequired({
+            tokenPageUrl: "https://portal.copper.ai/token",
+          })
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("copper_auth_token")
+          }
+          setAuthToken(null)
+        } else {
+          addDebugLog("log", "Auth token validated successfully")
+          setAuthRequired(null)
+        }
+      } catch (e: any) {
+        // If server is not available or request timed out, check if it's an auth error
+        if (e.name === "AbortError") {
+          addDebugLog("warn", "Auth validation timed out - assuming token is valid")
+        } else {
+          addDebugLog("warn", `Could not validate token (server may be offline): ${e.message || e}`)
+        }
+        // Don't block UI - assume token is OK if we can't validate
+        // User will get auth error on first real request if token is invalid
+        setAuthRequired(null)
+      }
+    }
+
+    validateAuth()
+  }, [addDebugLog])
+
+  // Listen for auth token from portal (via postMessage)
+  React.useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      try {
+        const data = typeof event.data === "string" ? JSON.parse(event.data) : event.data
+        if (data && typeof data === "object" && data.type === "copper_auth_token" && data.token) {
+          console.log("[agent_panel] Received auth token from portal")
+          
+          // Store in state and localStorage
+          setAuthToken(data.token)
+          if (typeof window !== "undefined") {
+            localStorage.setItem("copper_auth_token", data.token)
+          }
+          setAuthRequired(null)
+          
+          // Also send to agent server for compatibility
+          try {
+            await fetch(`${AGENT_BASE_URL}/api/auth/set-token`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                token: data.token,
+                access_token: data.token,
+                refresh_token: data.refresh_token,
+              }),
+            })
+          } catch (e) {
+            console.warn("[agent_panel] Failed to send token to server:", e)
+            // Non-critical - token is stored locally and will be sent per-request
+          }
+          
+          // Show success message
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `auth-success-${Date.now()}`,
+              role: "assistant",
+              content: "✅ Authentication successful! You can now continue using the agent.",
+              timestamp: new Date(),
+            },
+          ])
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+
+    window.addEventListener("message", handleMessage)
+    return () => window.removeEventListener("message", handleMessage)
+  }, [])
 
   // --- KiCad WebView RPC bridge (to fetch schematic context) ---
   const postToKiCad = (payload: string): boolean => {
@@ -140,7 +367,7 @@ export function ChatWindow() {
     w.kiclient = existing
   }, [])
 
-  const sendRpcCommand = async (command: string, parameters?: Record<string, any>) => {
+  const sendRpcCommand = React.useCallback(async (command: string, parameters?: Record<string, any>) => {
     const messageId = ++rpcIdRef.current
     const payload = JSON.stringify({
       command,
@@ -158,15 +385,16 @@ export function ChatWindow() {
         return
       }
 
-      // Timeout (don’t block sending forever)
+      // Increased timeout to 10 seconds for project path retrieval
+      const timeout = command === "GET_PROJECT_PATH" ? 10000 : 5000
       window.setTimeout(() => {
         if (rpcWaitersRef.current.has(messageId)) {
           rpcWaitersRef.current.delete(messageId)
-          reject(new Error("KiCad RPC timeout"))
+          reject(new Error(`KiCad RPC timeout after ${timeout}ms`))
         }
-      }, 5000)
+      }, timeout)
     })
-  }
+  }, [postToKiCad])
 
   const tryGetSchematicContext = async (): Promise<string> => {
     try {
@@ -180,6 +408,233 @@ export function ChatWindow() {
       return ""
     }
   }
+
+  const tryGetProjectPath = async (): Promise<string | null> => {
+    try {
+      addDebugLog("log", "Attempting to get project path from KiCad...")
+      
+      // Check if RPC bridge is available by testing postToKiCad
+      const testPayload = JSON.stringify({ command: "PING", message_id: 0, parameters: {} })
+      const bridgeAvailable = postToKiCad(testPayload)
+      
+      if (!bridgeAvailable) {
+        addDebugLog("warn", "KiCad RPC bridge not available - window.webkit, window.chrome.webview, or window.external not found")
+        return null
+      }
+
+      addDebugLog("log", "KiCad RPC bridge detected, sending GET_PROJECT_PATH command...")
+      
+      const resp = await sendRpcCommand("GET_PROJECT_PATH", {})
+      
+      addDebugLog("log", `GET_PROJECT_PATH response: ${JSON.stringify(resp)}`)
+      
+      if (resp?.status === "OK" && typeof resp.data === "string" && resp.data.trim()) {
+        const path = resp.data.trim()
+        addDebugLog("log", `✓ Project path retrieved: ${path}`)
+        return path
+      }
+      
+      if (resp?.status === "ERROR") {
+        addDebugLog("warn", `GET_PROJECT_PATH error: ${resp.error_message || "Unknown error"}`)
+        if (resp.error_message?.includes("No project")) {
+          addDebugLog("warn", "No project is currently open in KiCad")
+        }
+      } else if (resp?.status) {
+        addDebugLog("warn", `GET_PROJECT_PATH returned status: ${resp.status}, data: ${JSON.stringify(resp.data)}`)
+      } else {
+        addDebugLog("warn", "GET_PROJECT_PATH returned no response - command may have timed out")
+      }
+      
+      return null
+    } catch (e: any) {
+      addDebugLog("error", `Failed to get project path: ${e.message || e}`)
+      if (e.message?.includes("timeout")) {
+        addDebugLog("warn", "RPC command timed out - KiCad may be busy or not responding")
+      }
+      return null
+    }
+  }
+
+  // Extract user ID from JWT token or generate one
+  const getUserId = (): string => {
+    // Try to get from localStorage first
+    let storedUserId = localStorage.getItem("copper_user_id")
+    if (storedUserId) {
+      return storedUserId
+    }
+
+    // Try to extract from JWT token (check both state and localStorage)
+    const token = authToken || localStorage.getItem("copper_auth_token")
+    if (token) {
+      try {
+        const parts = token.split(".")
+        if (parts.length === 3) {
+          const payload = JSON.parse(atob(parts[1]))
+          if (payload.sub || payload.user_id || payload.id) {
+            const userId = payload.sub || payload.user_id || payload.id
+            localStorage.setItem("copper_user_id", userId)
+            return userId
+          }
+        }
+      } catch (e) {
+        console.warn("[agent_panel] Failed to decode JWT:", e)
+      }
+    }
+
+    // Generate a new user ID
+    const newUserId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    localStorage.setItem("copper_user_id", newUserId)
+    return newUserId
+  }
+
+  // Zip project and upload to agent_v3 server
+  const zipAndUploadProject = React.useCallback(async (): Promise<void> => {
+    try {
+      addDebugLog("log", "Starting project zip and upload...")
+      
+      // Retry getting project path a few times with delays
+      let projectPath: string | null = null
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        addDebugLog("log", `Attempt ${attempt}/3 to get project path...`)
+        projectPath = await tryGetProjectPath()
+        if (projectPath) {
+          break
+        }
+        if (attempt < 3) {
+          addDebugLog("log", `Waiting 1 second before retry...`)
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+      }
+
+      if (!projectPath) {
+        addDebugLog("warn", "No project path available after 3 attempts - project may not be open in KiCad")
+        addDebugLog("warn", "Upload skipped. Make sure a KiCad project is open.")
+        return
+      }
+
+      addDebugLog("log", `Project path: ${projectPath}`)
+
+      // Try to get zip from KiCad via RPC first
+      let zipBlob: Blob | null = null
+      try {
+        const zipResp = await sendRpcCommand("ZIP_PROJECT", { project_path: projectPath })
+        if (zipResp?.status === "OK" && zipResp.data) {
+          // If KiCad returns base64 encoded zip
+          if (typeof zipResp.data === "string") {
+            const binaryString = atob(zipResp.data)
+            const bytes = new Uint8Array(binaryString.length)
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i)
+            }
+            zipBlob = new Blob([bytes], { type: "application/zip" })
+            addDebugLog("log", `Got zip from KiCad RPC (${zipBlob.size} bytes)`)
+          }
+        }
+      } catch (e) {
+        addDebugLog("log", `ZIP_PROJECT RPC not available, will zip manually: ${e}`)
+      }
+
+      // If RPC didn't work, try to get project files and zip manually
+      if (!zipBlob) {
+        try {
+          const filesResp = await sendRpcCommand("GET_PROJECT_FILES", { project_path: projectPath })
+          if (filesResp?.status === "OK" && Array.isArray(filesResp.data)) {
+            const zip = new JSZip()
+            const files = filesResp.data as Array<{ path: string; content: string }>
+            
+            for (const file of files) {
+              zip.file(file.path, file.content)
+            }
+            
+            const generatedBlob = await zip.generateAsync({ type: "blob" })
+            zipBlob = generatedBlob
+            addDebugLog("log", `Created zip manually from project files (${generatedBlob.size} bytes)`)
+          }
+        } catch (e) {
+          addDebugLog("warn", `Failed to get project files: ${e}`)
+        }
+      }
+
+      // If still no zip, try to get a list of files and request them individually
+      if (!zipBlob) {
+        try {
+          const listResp = await sendRpcCommand("LIST_PROJECT_FILES", { project_path: projectPath })
+          if (listResp?.status === "OK" && Array.isArray(listResp.data)) {
+            const zip = new JSZip()
+            const filePaths = listResp.data as string[]
+            
+            // Request each file
+            for (const filePath of filePaths) {
+              try {
+                const fileResp = await sendRpcCommand("GET_FILE", { file_path: filePath })
+                if (fileResp?.status === "OK" && fileResp.data) {
+                  const content = typeof fileResp.data === "string" ? fileResp.data : JSON.stringify(fileResp.data)
+                  // Use relative path from project directory
+                  const relativePath = filePath.startsWith(projectPath) 
+                    ? filePath.substring(projectPath.length + 1)
+                    : filePath
+                  zip.file(relativePath, content)
+                }
+              } catch (e) {
+                addDebugLog("warn", `Failed to get file ${filePath}: ${e}`)
+              }
+            }
+            
+            const generatedBlob = await zip.generateAsync({ type: "blob" })
+            zipBlob = generatedBlob
+            addDebugLog("log", `Created zip from individual file requests (${generatedBlob.size} bytes)`)
+          }
+        } catch (e) {
+          addDebugLog("warn", `Failed to list/get project files: ${e}`)
+          return
+        }
+      }
+
+      if (!zipBlob) {
+        addDebugLog("error", "Could not create project zip - all methods failed")
+        return
+      }
+
+      // Upload to agent_v3 server
+      const userId = getUserId()
+      addDebugLog("log", `Uploading to ${AGENT_V3_URL}/api/upload-project (user: ${userId}, session: ${sessionId})`)
+      
+      const formData = new FormData()
+      formData.append("project", zipBlob, "project.zip")
+      if (projectPath) {
+        formData.append("projectPath", projectPath)
+      }
+
+      try {
+        const uploadResp = await fetch(`${AGENT_V3_URL}/api/upload-project`, {
+          method: "POST",
+          headers: {
+            "X-User-ID": userId,
+            "X-Session-ID": sessionId,
+          },
+          body: formData,
+        })
+
+        if (!uploadResp.ok) {
+          const errorText = await uploadResp.text()
+          throw new Error(`Upload failed: ${uploadResp.status} ${errorText}`)
+        }
+
+        const result = await uploadResp.json()
+        addDebugLog("log", `Project uploaded successfully: ${JSON.stringify(result)}`)
+      } catch (uploadError: any) {
+        addDebugLog("error", `Upload failed: ${uploadError.message || uploadError}`)
+        // Check if it's a network error
+        if (uploadError.message?.includes("fetch") || uploadError.message?.includes("Failed to fetch")) {
+          addDebugLog("error", `Cannot reach agent_v3 server at ${AGENT_V3_URL}. Is it running?`)
+        }
+        throw uploadError
+      }
+    } catch (e: any) {
+      addDebugLog("error", `Failed to zip and upload project: ${e.message || e}`)
+      // Don't show error to user, just log it
+    }
+  }, [sendRpcCommand, addDebugLog, sessionId, getUserId])
 
   const runToolCallNow = async (
     messageId: string,
@@ -205,7 +660,7 @@ export function ChatWindow() {
       }
       
       const ok = resp.status === "OK"
-      const respData = resp.data
+      let respData = resp.data
       const errorMessage = resp.error_message
 
       const isReadOnlyTool = toolName === "schematic.search_symbol" || toolName === "schematic.get_datasheet"
@@ -231,6 +686,61 @@ export function ChatWindow() {
           }
         } catch (e: any) {
           datasheetIngestNote = `RAG: ingest failed (${e?.message || "network error"})`
+        }
+      }
+
+      // Check if the tool result contains a schematic file path and automatically replace the schematic
+      if (ok && typeof respData === "string" && respData.trim()) {
+        // Look for schematic file paths in the response (common patterns)
+        const schematicFilePatterns = [
+          /(?:file[_\s]*path|saved[_\s]*to|output[_\s]*file)[:\s]+([^\s]+\.kicad_sch)/i,
+          /([^\s]+\.kicad_sch)/i, // Any .kicad_sch file path
+        ]
+
+        for (const pattern of schematicFilePatterns) {
+          const match = respData.match(pattern)
+          if (match && match[1]) {
+            const filePath = match[1].trim()
+            
+            // Check if it's an absolute path or relative to project
+            let fullPath = filePath
+            if (!filePath.startsWith("/") && !filePath.match(/^[A-Za-z]:/)) {
+              // Relative path - try to get project path and make it absolute
+              try {
+                const projectPathResp = await sendRpcCommand("GET_PROJECT_PATH", {})
+                if (projectPathResp?.status === "OK" && projectPathResp.data) {
+                  const projectPath = projectPathResp.data as string
+                  // Simple path joining (assuming Unix-style paths)
+                  fullPath = projectPath.endsWith("/") 
+                    ? `${projectPath}${filePath}` 
+                    : `${projectPath}/${filePath}`
+                }
+              } catch (e) {
+                console.warn("Failed to get project path for relative schematic file:", e)
+              }
+            }
+
+            // Try to replace the schematic
+            try {
+              addDebugLog("log", `Detected schematic file in tool result: ${fullPath}, attempting to replace...`)
+              const replaceResp = await sendRpcCommand("REPLACE_SCHEMATIC", {
+                file_path: fullPath,
+                skip_undo: false, // Keep undo history
+                skip_set_dirty: false, // Mark as modified
+              })
+
+              if (replaceResp?.status === "OK") {
+                addDebugLog("log", `Successfully replaced schematic from: ${fullPath}`)
+                // Update the tool result to indicate the schematic was replaced
+                respData = `${respData}\n\n✅ Schematic replaced in RAM from: ${fullPath}`
+              } else {
+                addDebugLog("warn", `Failed to replace schematic: ${replaceResp?.error_message || "Unknown error"}`)
+              }
+            } catch (e: any) {
+              addDebugLog("error", `Error replacing schematic: ${e?.message || "Unknown error"}`)
+            }
+            break // Only process the first match
+          }
         }
       }
 
@@ -682,10 +1192,73 @@ export function ChatWindow() {
 
     return {
       visibleText: visible,
-      thinkingText: thinking.trim(),
+      thinkingText: thinking, // Don't trim to preserve whitespace
       thinkingOpen: open,
     }
   }
+
+  // Poll for pending tool calls from Codex agent (via MCP server)
+  // This allows Codex (running on server) to call KiCad tools via agent_panel
+  React.useEffect(() => {
+    if (!sessionId) return
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const resp = await fetch(`${AGENT_V3_URL}/api/kicad/pending-tools?sessionId=${sessionId}`)
+        if (!resp.ok) return
+
+        const data = await resp.json()
+        if (!data.success || !data.pending || data.pending.length === 0) return
+
+        // Process each pending tool call
+        for (const call of data.pending) {
+          try {
+            addDebugLog("log", `Executing tool call from Codex: ${call.tool_name}`)
+
+            // Execute tool call via KiCad RPC
+            const result = await sendRpcCommand("RUN_TOOL", {
+              tool_name: call.tool_name,
+              payload: call.payload,
+            })
+
+            // Send result back to agent_v3 server
+            await fetch(`${AGENT_V3_URL}/api/kicad/tool-result`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                callId: call.id,
+                result: result.status === "OK" ? result.data : null,
+                error: result.status === "ERROR" ? result.error_message : null,
+              }),
+            })
+
+            addDebugLog("log", `Tool call ${call.tool_name} completed`)
+          } catch (e: any) {
+            addDebugLog("error", `Error executing tool call ${call.tool_name}: ${e?.message || e}`)
+            
+            // Send error back
+            try {
+              await fetch(`${AGENT_V3_URL}/api/kicad/tool-result`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  callId: call.id,
+                  result: null,
+                  error: e?.message || "Unknown error",
+                }),
+              })
+            } catch (sendError) {
+              // Ignore send errors
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore polling errors (server might be down, etc.)
+      }
+    }, 1000) // Poll every second
+
+    return () => clearInterval(pollInterval)
+  }, [sessionId, sendRpcCommand, addDebugLog])
 
   const sendPrompt = async (promptText: string, silent: boolean = false) => {
     const trimmedPrompt = promptText.trim()
@@ -711,6 +1284,9 @@ export function ChatWindow() {
       // Include KiCad schematic context if available
       const schematicContext = await tryGetSchematicContext()
       const requestPrompt = schematicContext ? `${trimmedPrompt}\n\n${schematicContext}` : trimmedPrompt
+
+      // Get project path for the agent
+      const projectPath = await tryGetProjectPath()
 
       // Create thinking + assistant messages that will be updated as we stream
       const assistantMessageId = `assistant-${Date.now()}`
@@ -743,23 +1319,115 @@ export function ChatWindow() {
 
       setMessages((prev) => [...prev, thinkingMessage, managerMessage, assistantMessage])
 
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Session-ID": sessionId,
+      }
+
+      // Add Authorization header if we have a token
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`
+      }
+
+      // Use agent_v3 format (sessionId in body, no stream/project_path needed)
       const response = await fetch(AGENT_API_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Session-ID": sessionId,
-        },
+        headers,
         signal: abortController.signal,
         body: JSON.stringify({
           model: selectedModel,
           prompt: requestPrompt,
-          stream: true,
-          session_id: sessionId,
+          sessionId: sessionId, // agent_v3 uses sessionId (not session_id)
         }),
       })
 
+      // Handle authentication errors before streaming
+      if (response.status === 401) {
+        try {
+          const errorData = await response.json()
+          if (errorData.auth_required) {
+            setAuthRequired({
+              loginUrl: errorData.login_url,
+              tokenPageUrl: errorData.token_page_url || "https://portal.copper.ai/token",
+            })
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `error-${Date.now()}`,
+                role: "assistant",
+                content: "❌ Authentication required. Please log in to continue.",
+                timestamp: new Date(),
+              },
+            ])
+            return
+          }
+        } catch {
+          // If parsing fails, show generic auth error
+          setAuthRequired({
+            tokenPageUrl: "https://portal.copper.ai/token",
+          })
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `error-${Date.now()}`,
+              role: "assistant",
+              content: "❌ Authentication required. Please log in to continue.",
+              timestamp: new Date(),
+            },
+          ])
+          return
+        }
+      }
+
       if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`)
+        let errorMessage = `API error: ${response.status} ${response.statusText}`;
+        let requiresReupload = false;
+        try {
+          const errorData = await response.json();
+          if (errorData.error || errorData.message) {
+            errorMessage = errorData.error || errorData.message;
+          }
+          if (errorData.requiresReupload) {
+            requiresReupload = true;
+          }
+          addDebugLog("error", `API returned ${response.status}: ${JSON.stringify(errorData)}`);
+        } catch (e) {
+          const errorText = await response.text().catch(() => "");
+          if (errorText) {
+            errorMessage += ` - ${errorText}`;
+            addDebugLog("error", `API returned ${response.status}: ${errorText}`);
+          }
+        }
+        
+        // If we need to re-upload, try to do it automatically
+        if (requiresReupload) {
+          addDebugLog("warn", "Project directory not found, attempting to re-upload project...");
+          try {
+            await zipAndUploadProject();
+            addDebugLog("log", "✅ Project re-uploaded successfully, retrying request...");
+            // Retry the request after a short delay
+            const retryPrompt = promptText;
+            const retrySilent = silent;
+            setTimeout(() => {
+              void sendPrompt(retryPrompt, retrySilent);
+            }, 500);
+            return;
+          } catch (uploadError: any) {
+            addDebugLog("error", `Failed to re-upload project: ${uploadError.message || uploadError}`);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `error-${Date.now()}`,
+                role: "assistant",
+                content: `❌ Error: Project directory not found and automatic re-upload failed. Please try again.`,
+                timestamp: new Date(),
+              },
+            ]);
+            return;
+          }
+        }
+        
+        throw new Error(errorMessage);
       }
 
       const reader = response.body?.getReader()
@@ -785,6 +1453,65 @@ export function ChatWindow() {
             const responseText = data.response || ""
             const agentTag = typeof data.agent === "string" ? data.agent : null
             const targetMessageId = agentTag === "manager" ? managerMessageId : assistantMessageId
+
+            // Check if server sent a schematic file path to apply
+            if (data.schematic_file && typeof data.schematic_file === "string") {
+              const schematicPath = data.schematic_file.trim()
+              addDebugLog("log", `Server sent schematic file path: ${schematicPath}`)
+              
+              // Automatically apply the schematic
+              setTimeout(async () => {
+                try {
+                  const replaceResp = await sendRpcCommand("REPLACE_SCHEMATIC", {
+                    file_path: schematicPath,
+                    skip_undo: false,
+                    skip_set_dirty: false,
+                  })
+                  
+                  if (replaceResp?.status === "OK") {
+                    addDebugLog("log", `✅ Successfully applied schematic from agent: ${schematicPath}`)
+                    setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessageId
+                          ? {
+                              ...msg,
+                              content: `${msg.content}\n\n✅ Schematic applied from agent directory.`,
+                            }
+                          : msg
+                      )
+                    )
+                  } else {
+                    const errorMsg = replaceResp?.error_message || "Unknown error"
+                    addDebugLog("warn", `Failed to apply schematic: ${errorMsg}`)
+                    // Show error to user in chat
+                    setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessageId
+                          ? {
+                              ...msg,
+                              content: `${msg.content}\n\n❌ Failed to apply schematic:\n${errorMsg}`,
+                            }
+                          : msg
+                      )
+                    )
+                  }
+                } catch (e: any) {
+                  const errorMsg = e?.message || "Unknown error"
+                  addDebugLog("error", `Error applying schematic: ${errorMsg}`)
+                  // Show error to user in chat
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            content: `${msg.content}\n\n❌ Error applying schematic: ${errorMsg}`,
+                          }
+                        : msg
+                    )
+                  )
+                }
+              }, 100) // Small delay to ensure message is processed first
+            }
 
             // Parse plan/todos from the response
             if (data.plan && data.plan.todos && Array.isArray(data.plan.todos)) {
@@ -846,9 +1573,19 @@ export function ChatWindow() {
 
               // Update the thinking row (smaller/darker UI in render). If no thinking, keep hidden.
               if (thinkingText || thinkingOpen) {
+                // Add line breaks between thinking statements for better readability
+                // Break on camelCase transitions and sentence endings
+                const formattedThinking = thinkingText
+                  .replace(/([a-z])([A-Z])/g, '$1\n$2') // Break camelCase: "ReadingFile" -> "Reading\nFile"
+                  .replace(/([.!?])\s*([A-Z])/g, '$1\n\n$2') // Break on sentence endings
+                  .split('\n')
+                  .map(line => line.trim())
+                  .filter(line => line.length > 0)
+                  .join('\n')
+                
                 const displayThinking = thinkingOpen
-                  ? `Thinking…\n${thinkingText}`.trim()
-                  : thinkingText
+                  ? `Thinking…\n\n${formattedThinking}`
+                  : formattedThinking
 
                 setMessages((prev) =>
                   prev.map((msg) =>
@@ -941,7 +1678,7 @@ export function ChatWindow() {
                   msg.id === thinkingMessageId
                     ? {
                         ...msg,
-                        content: thinkingText,
+                        content: thinkingText || "", // Preserve whitespace
                       }
                     : msg
                 )
@@ -963,13 +1700,61 @@ export function ChatWindow() {
         )
         return
       }
+      
+      // Check if error response indicates we need to re-upload the project
+      let requiresReupload = false
+      if (error instanceof Error && 'response' in error) {
+        try {
+          const errorResponse = (error as any).response
+          if (errorResponse && typeof errorResponse.json === 'function') {
+            const errorData = await errorResponse.json()
+            if (errorData.requiresReupload) {
+              requiresReupload = true
+            }
+          }
+        } catch (e) {
+          // Ignore JSON parse errors
+        }
+      }
+      
+      // If we need to re-upload, try to do it automatically
+      if (requiresReupload) {
+        addDebugLog("warn", "Project directory not found, attempting to re-upload project...")
+        try {
+          await zipAndUploadProject()
+          addDebugLog("log", "✅ Project re-uploaded successfully, retrying request...")
+          // Retry the request after a short delay
+          const retryPrompt = promptText;
+          const retrySilent = silent;
+          setTimeout(() => {
+            void sendPrompt(retryPrompt, retrySilent);
+          }, 500);
+          return
+        } catch (uploadError: any) {
+          addDebugLog("error", `Failed to re-upload project: ${uploadError.message || uploadError}`)
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `error-${Date.now()}`,
+              role: "assistant",
+              content: `❌ Error: Project directory not found and automatic re-upload failed. Please try again.`,
+              timestamp: new Date(),
+            },
+          ])
+          return
+        }
+      }
+      
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      const errorDetails = error instanceof Error && error.stack ? error.stack : ""
       console.error("Error calling agent API:", error)
+      addDebugLog("error", `Agent API error: ${errorMessage}${errorDetails ? `\n${errorDetails}` : ""}`)
       setMessages((prev) => [
         ...prev,
         {
           id: `error-${Date.now()}`,
           role: "assistant",
-          content: `Error: ${error instanceof Error ? error.message : "Failed to get response from agent"}`,
+          content: `❌ Error: ${errorMessage}. Check the debug console for details.`,
           timestamp: new Date(),
         },
       ])
@@ -1056,11 +1841,16 @@ export function ChatWindow() {
                     </AvatarFallback>
                   </Avatar>
                   <div
-                    className={`min-w-0 max-w-[80%] text-[11px] leading-snug text-[#7C8590] font-mono py-1 whitespace-pre-wrap break-words ${
+                    className={`min-w-0 max-w-[80%] text-[11px] leading-[1.6] text-[#7C8590] font-mono py-2 px-2 whitespace-pre-wrap break-words ${
                       isLoading ? "animate-pulse" : ""
                     }`}
                   >
-                    {message.content}
+                    {message.content.split(/\n+/).map((line, idx, arr) => (
+                      <React.Fragment key={idx}>
+                        {line}
+                        {idx < arr.length - 1 && <br />}
+                      </React.Fragment>
+                    ))}
                   </div>
                 </div>
               )
@@ -1171,7 +1961,7 @@ export function ChatWindow() {
 
                 {/* Tool Calls - Compact display */}
                 {message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="ml-9 space-y-0.5">
+                  <div className="ml-9 space-y-2">
                     {message.toolCalls.map((toolCall) => (
                       <ToolCallComponent
                         key={toolCall.id}
@@ -1294,6 +2084,44 @@ export function ChatWindow() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Debug Console */}
+      <div className="border-t border-[#22272F]">
+        <button
+          onClick={() => setShowDebugConsole(!showDebugConsole)}
+          className="w-full px-3 py-1.5 text-xs text-[#9AA3AD] hover:text-[#E7E9EC] hover:bg-[#151A21] flex items-center justify-between"
+        >
+          <span>Debug Console ({debugLogs.length} logs)</span>
+          <span>{showDebugConsole ? "▼" : "▶"}</span>
+        </button>
+        {showDebugConsole && (
+          <div className="bg-[#0A0C0F] border-t border-[#22272F] max-h-[200px] overflow-y-auto">
+            <ScrollArea className="h-full">
+              <div className="p-2 space-y-0.5 font-mono text-[10px]">
+                {debugLogs.length === 0 ? (
+                  <div className="text-[#7C8590] px-2 py-1">No logs yet...</div>
+                ) : (
+                  debugLogs.map((log, idx) => (
+                    <div
+                      key={idx}
+                      className={`px-2 py-0.5 ${
+                        log.level === "error"
+                          ? "text-[#FF6B6B]"
+                          : log.level === "warn"
+                          ? "text-[#FFD93D]"
+                          : "text-[#7C8590]"
+                      }`}
+                    >
+                      <span className="text-[#5A6268]">[{log.time}]</span>{" "}
+                      <span className="text-[#5A6268]">[{log.level}]</span> {log.message}
+                    </div>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </div>
+        )}
       </div>
     </div>
   )
