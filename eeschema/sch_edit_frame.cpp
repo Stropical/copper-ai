@@ -3026,13 +3026,171 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
 
             static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->BindLoadedEvent();
             
-            // For now, just load a simple placeholder
-            // TODO: Add full initialization code (dev server, HTML file loading, etc.)
-            // when needed. See the removed initialization code for reference.
-            static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( 
-                wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
-                     "<body style='background:#0A0A0A;color:#E5E5E5;font-family:system-ui;padding:16px;'>"
-                     "<h2>AI Agent Panel</h2><p>Loading...</p></body></html>" ) );
+            // Dev override: load the agent panel from a live dev server (hot reload)
+            // instead of the static exported bundle under eeschema/widgets/agent_panel/out/.
+            //
+            // Example:
+            //   set KICAD_AGENT_PANEL_DEV_URL=http://localhost:3000
+            //   (then run `npm run dev` in eeschema/widgets/agent_panel)
+            wxString devUrl;
+            bool useDevServer = false;
+
+            if( wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV_URL" ), &devUrl ) && !devUrl.IsEmpty() )
+            {
+                useDevServer = true;
+            }
+            else
+            {
+                wxString devFlag;
+
+                if( wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV" ), &devFlag ) && !devFlag.IsEmpty()
+                    && !devFlag.IsSameAs( wxS( "0" ) ) && !devFlag.IsSameAs( wxS( "false" ), false ) )
+                {
+                    devUrl = wxS( "http://localhost:3000" );
+                    useDevServer = true;
+                }
+            }
+
+            if( useDevServer )
+            {
+                wxLogTrace( wxS( "webview" ), "Agent panel: using dev URL: %s", devUrl );
+
+                // Dev-only: show a quick splash so it's obvious we're trying the dev server.
+                wxString splash = wxString::Format(
+                        wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
+                             "<body style='background:#0A0A0A;color:#E5E5E5;font-family:system-ui;padding:16px;'>"
+                             "<h2 style='margin:0 0 8px 0;'>Agent Panel (dev)</h2>"
+                             "<div>Loading: <code>%s</code></div>"
+                             "</body></html>" ),
+                        devUrl );
+                static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( splash );
+
+                // Allow http(s) navigation inside the panel while in dev mode.
+                static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetHandleExternalLinks( true );
+                static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->LoadURL( devUrl );
+            }
+            else
+            {
+                wxFileName htmlPath;
+                bool found = false;
+            
+                // Try multiple locations to find the HTML file
+            
+                // Method 1: Relative to current working directory (for development)
+                htmlPath.AssignDir( wxGetCwd() );
+                htmlPath.AppendDir( wxS( "eeschema" ) );
+                htmlPath.AppendDir( wxS( "widgets" ) );
+                htmlPath.AppendDir( wxS( "agent_panel" ) );
+                htmlPath.AppendDir( wxS( "out" ) );
+                htmlPath.SetFullName( wxS( "index.html" ) );
+                htmlPath.MakeAbsolute();
+            
+                if( htmlPath.FileExists() )
+                {
+                    found = true;
+                }
+                else
+                {
+                    // Method 2: Relative to source file location (__FILE__)
+                    // __FILE__ is typically: .../eeschema/sch_edit_frame.cpp
+                    // We want: .../eeschema/widgets/agent_panel/out/index.html
+                    wxString sourceFile( wxS( __FILE__ ) );
+                    htmlPath.Assign( sourceFile );
+                    // htmlPath now points to .../eeschema/sch_edit_frame.cpp
+                    // We need to stay in eeschema/ directory and navigate to widgets/agent_panel/out/
+                    // Clear the filename but keep the directory (eeschema/)
+                    htmlPath.SetName( wxEmptyString );
+                    htmlPath.SetExt( wxEmptyString );
+                    htmlPath.AppendDir( wxS( "widgets" ) );
+                    htmlPath.AppendDir( wxS( "agent_panel" ) );
+                    htmlPath.AppendDir( wxS( "out" ) );
+                    htmlPath.SetFullName( wxS( "index.html" ) );
+                    htmlPath.MakeAbsolute();
+                    
+                    if( htmlPath.FileExists() )
+                    {
+                        found = true;
+                    }
+                    else
+                    {
+                        // Method 3: Relative to executable path (for running from build directory)
+                        // Try going up from executable to find source directory
+                        wxString exePath = wxStandardPaths::Get().GetExecutablePath();
+                        wxFileName exeFile( exePath );
+                        exeFile.MakeAbsolute();
+                        
+                        // Try going up directories to find the source tree
+                        // Executable might be at: build/kicad/KiCad.app/Contents/MacOS/kicad
+                        // We want: .../eeschema/widgets/agent_panel/out/index.html
+                        wxFileName tryPath = exeFile;
+                        tryPath.RemoveLastDir(); // Remove "MacOS" or executable name
+                        tryPath.RemoveLastDir(); // Remove "Contents"
+                        tryPath.RemoveLastDir(); // Remove "KiCad.app" or similar
+                        tryPath.RemoveLastDir(); // Remove "kicad"
+                        tryPath.RemoveLastDir(); // Remove "build" or similar
+                        // Now we should be at the repo root
+                        tryPath.AppendDir( wxS( "eeschema" ) );
+                        tryPath.AppendDir( wxS( "widgets" ) );
+                        tryPath.AppendDir( wxS( "agent_panel" ) );
+                        tryPath.AppendDir( wxS( "out" ) );
+                        tryPath.SetFullName( wxS( "index.html" ) );
+                        tryPath.MakeAbsolute();
+                        
+                        if( tryPath.FileExists() )
+                        {
+                            htmlPath = tryPath;
+                            found = true;
+                        }
+                    }
+                }
+
+                if( found )
+                {
+                    wxString url = wxFileName::FileNameToURL( htmlPath );
+                    wxLogTrace( wxS( "webview" ), "Agent panel: loading HTML from %s", htmlPath.GetFullPath() );
+                    static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->LoadURL( url );
+                }
+                else
+                {
+                    // If HTML file not found, show a helpful message
+                    wxString exePath = wxStandardPaths::Get().GetExecutablePath();
+
+                    wxString envDevUrl;
+                    const bool hasEnvDevUrl = wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV_URL" ), &envDevUrl )
+                                              && !envDevUrl.IsEmpty();
+
+                    wxString envDevFlag;
+                    const bool hasEnvDevFlag = wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV" ), &envDevFlag )
+                                               && !envDevFlag.IsEmpty();
+
+                    auto escape = []( wxString s )
+                    {
+                        s.Replace( "&", "&amp;" );
+                        s.Replace( "<", "&lt;" );
+                        s.Replace( ">", "&gt;" );
+                        return s;
+                    };
+
+                    const wxString notSet = wxString( wxS( "(not set)" ) );
+                    const wxString devUrlDisplay = hasEnvDevUrl ? escape( envDevUrl ) : notSet;
+                    const wxString devFlagDisplay = hasEnvDevFlag ? escape( envDevFlag ) : notSet;
+
+                    wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Agent Panel</h1><p>Build the agent panel first:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd eeschema/widgets/agent_panel<br>npm run build</pre><p>Tried path: " ) 
+                                  + htmlPath.GetFullPath() 
+                              + wxS( "</p>" )
+                              + wxS( "<hr style='border:0;border-top:1px solid #22272F;margin:16px 0;'/>" )
+                              + wxS( "<h3 style='margin:0 0 8px 0;font-size:14px;'>Debug</h3>" )
+                              + wxS( "<div style='font-size:12px;line-height:1.5;'>" )
+                              + wxS( "<div><strong>Executable:</strong> <code>" ) + escape( exePath ) + wxS( "</code></div>" )
+                              + wxS( "<div><strong>CWD:</strong> <code>" ) + escape( wxGetCwd() ) + wxS( "</code></div>" )
+                              + wxS( "<div><strong>KICAD_AGENT_PANEL_DEV_URL:</strong> <code>" )
+                              + devUrlDisplay + wxS( "</code></div>" )
+                              + wxS( "<div><strong>KICAD_AGENT_PANEL_DEV:</strong> <code>" )
+                              + devFlagDisplay + wxS( "</code></div>" )
+                              + wxS( "</div></body></html>" );
+                    static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( html );
+                }
+            }
             
             // Replace the pane
             agentPane.Window( m_ollamaAgentPane );
