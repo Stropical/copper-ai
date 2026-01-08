@@ -64,6 +64,7 @@
 #include <wx/zipstrm.h>
 #include <wx/dir.h>
 #include <wx/wfstream.h>
+#include <wx/ffile.h>
 #include <python_scripting.h>
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
@@ -2981,10 +2982,7 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
                         response["command"] = command;
                         response["response_to"] = messageId;
 
-                        // Handle commands (GET_SCHEMATIC_CONTEXT, GET_PROJECT_PATH, ZIP_PROJECT, REPLACE_SCHEMATIC, RUN_TOOL)
-                        // ... [rest of handler code from lines 340-722]
-                        
-                        // For now, just handle basic commands to avoid duplication
+                        // Handle commands
                         if( command == "GET_SCHEMATIC_CONTEXT" )
                         {
                             size_t maxChars = 50000;
@@ -3004,6 +3002,192 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
 
                             response["status"] = "OK";
                             response["data"] = context.ToUTF8().data();
+                        }
+                        else if( command == "GET_PROJECT_PATH" )
+                        {
+                            wxString projectPath = Prj().GetProjectPath();
+                            response["status"] = "OK";
+                            response["data"] = projectPath.ToUTF8().data();
+                        }
+                        else if( command == "REPLACE_SCHEMATIC_FROM_DATA" )
+                        {
+                            wxString filename;
+                            std::string fileContentBase64;
+                            int commitFlags = 0;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "filename" ) && params["filename"].is_string() )
+                                    filename = wxString::FromUTF8( params["filename"].get<std::string>().c_str() );
+                                
+                                if( params.contains( "file_content" ) && params["file_content"].is_string() )
+                                    fileContentBase64 = params["file_content"].get<std::string>();
+                                
+                                if( params.contains( "skip_undo" ) && params["skip_undo"].is_boolean() 
+                                    && params["skip_undo"].get<bool>() )
+                                    commitFlags |= SKIP_UNDO;
+                                
+                                if( params.contains( "skip_set_dirty" ) && params["skip_set_dirty"].is_boolean() 
+                                    && params["skip_set_dirty"].get<bool>() )
+                                    commitFlags |= SKIP_SET_DIRTY;
+                            }
+
+                            if( filename.IsEmpty() || fileContentBase64.empty() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Missing parameters.filename or parameters.file_content";
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    // Decode base64 content
+                                    wxString base64Str = wxString::FromUTF8( fileContentBase64.c_str() );
+                                    wxMemoryBuffer fileData = wxBase64Decode( base64Str );
+                                    
+                                    if( fileData.GetDataLen() == 0 )
+                                    {
+                                        response["status"] = "ERROR";
+                                        response["error_message"] = "Failed to decode base64 file content";
+                                    }
+                                    else
+                                    {
+                                        // Create a temporary file with .kicad_sch extension for proper file type detection
+                                        wxString tempDir = wxStandardPaths::Get().GetTempDir();
+                                        wxString tempFileBase = wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + "kicad_upload_" );
+                                        
+                                        // Delete the file created by CreateTempFileName since we need a different extension
+                                        if( wxFileExists( tempFileBase ) )
+                                            wxRemoveFile( tempFileBase );
+                                        
+                                        // Create filename with .kicad_sch extension for proper file type detection
+                                        wxFileName tempFileName( tempFileBase );
+                                        tempFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
+                                        wxString tempFile = tempFileName.GetFullPath();
+                                        
+                                        // Write the file content to the temporary file
+                                        wxFFile tempFileHandle( tempFile, "wb" );
+                                        if( !tempFileHandle.IsOpened() )
+                                        {
+                                            response["status"] = "ERROR";
+                                            response["error_message"] = "Failed to create temporary file";
+                                        }
+                                        else
+                                        {
+                                            tempFileHandle.Write( fileData.GetData(), fileData.GetDataLen() );
+                                            tempFileHandle.Close();
+                                            
+                                            // Call ReplaceSchematicInRAM with the temporary file
+                                            wxString errorMsg;
+                                            bool success = ReplaceSchematicInRAM( tempFile, 
+                                                                                  SCH_IO_MGR::SCH_FILE_UNKNOWN, 
+                                                                                  commitFlags,
+                                                                                  &errorMsg );
+                                            
+                                            // Clean up temporary file
+                                            wxRemoveFile( tempFile );
+                                            
+                                            if( success )
+                                            {
+                                                response["status"] = "OK";
+                                                response["data"] = wxString::Format( 
+                                                    _( "Schematic replaced successfully from uploaded file: %s" ), filename ).ToUTF8().data();
+                                            }
+                                            else
+                                            {
+                                                response["status"] = "ERROR";
+                                                if( !errorMsg.IsEmpty() )
+                                                {
+                                                    response["error_message"] = errorMsg.ToUTF8().data();
+                                                }
+                                                else
+                                                {
+                                                    response["error_message"] = wxString::Format( 
+                                                        _( "Failed to replace schematic from uploaded file: %s" ), filename ).ToUTF8().data();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch( const std::exception& e )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = std::string( "Exception: " ) + e.what();
+                                }
+                                catch( ... )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = "Unknown exception occurred";
+                                }
+                            }
+                        }
+                        else if( command == "REPLACE_SCHEMATIC" )
+                        {
+                            wxString filePath;
+                            int commitFlags = 0;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "file_path" ) && params["file_path"].is_string() )
+                                    filePath = wxString::FromUTF8( params["file_path"].get<std::string>().c_str() );
+                                
+                                if( params.contains( "skip_undo" ) && params["skip_undo"].is_boolean() 
+                                    && params["skip_undo"].get<bool>() )
+                                    commitFlags |= SKIP_UNDO;
+                                
+                                if( params.contains( "skip_set_dirty" ) && params["skip_set_dirty"].is_boolean() 
+                                    && params["skip_set_dirty"].get<bool>() )
+                                    commitFlags |= SKIP_SET_DIRTY;
+                            }
+
+                            if( filePath.IsEmpty() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Missing parameters.file_path";
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    wxString errorMsg;
+                                    bool success = ReplaceSchematicInRAM( filePath, 
+                                                                          SCH_IO_MGR::SCH_FILE_UNKNOWN, 
+                                                                          commitFlags,
+                                                                          &errorMsg );
+                                    
+                                    if( success )
+                                    {
+                                        response["status"] = "OK";
+                                        response["data"] = wxString::Format( 
+                                            _( "Schematic replaced successfully from file: %s" ), filePath ).ToUTF8().data();
+                                    }
+                                    else
+                                    {
+                                        response["status"] = "ERROR";
+                                        if( !errorMsg.IsEmpty() )
+                                        {
+                                            response["error_message"] = errorMsg.ToUTF8().data();
+                                        }
+                                        else
+                                        {
+                                            response["error_message"] = wxString::Format( 
+                                                _( "Failed to replace schematic from file: %s" ), filePath ).ToUTF8().data();
+                                        }
+                                    }
+                                }
+                                catch( const std::exception& e )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = std::string( "Exception: " ) + e.what();
+                                }
+                                catch( ... )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = "Unknown exception occurred";
+                                }
+                            }
                         }
                         else
                         {

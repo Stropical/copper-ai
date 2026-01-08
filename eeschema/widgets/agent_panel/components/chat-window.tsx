@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToolCallComponent, ToolCall } from "@/components/tool-call"
-import { Send, User, Bot, Sparkles, Check, X } from "lucide-react"
+import { Send, User, Bot, Sparkles, Check, X, Upload } from "lucide-react"
 import { Streamdown } from "streamdown"
 import JSZip from "jszip"
 
@@ -71,6 +71,8 @@ export function ChatWindow() {
   const [authToken, setAuthToken] = React.useState<string | null>(null)
   const [debugLogs, setDebugLogs] = React.useState<Array<{ time: string; level: string; message: string }>>([])
   const [showDebugConsole, setShowDebugConsole] = React.useState(false)
+  const [isUploading, setIsUploading] = React.useState(false)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const queuedPromptRef = React.useRef<string | null>(null)
   const queuedAutoPromptRef = React.useRef<string | null>(null)
@@ -454,6 +456,104 @@ export function ChatWindow() {
       return null
     }
   }
+
+  const handleUploadSchematic = React.useCallback(async (file: File) => {
+    setIsUploading(true)
+    addDebugLog("log", `Uploading schematic file: ${file.name}`)
+    
+    try {
+      // Read the file as ArrayBuffer and convert to base64
+      const reader = new FileReader()
+      reader.onload = async (e) => {
+        try {
+          const arrayBuffer = e.target?.result as ArrayBuffer
+          const bytes = new Uint8Array(arrayBuffer)
+          const binary = String.fromCharCode(...bytes)
+          const base64 = btoa(binary)
+          
+          addDebugLog("log", `File read successfully, size: ${file.size} bytes`)
+          
+          // Try to call REPLACE_SCHEMATIC_FROM_DATA RPC command
+          // This will need to be implemented in KiCad to accept base64 file content
+          const resp = await sendRpcCommand("REPLACE_SCHEMATIC_FROM_DATA", {
+            filename: file.name,
+            file_content: base64,
+            skip_undo: false,
+            skip_set_dirty: false,
+          })
+          
+          if (resp?.status === "OK") {
+            addDebugLog("log", `✓ Schematic file uploaded successfully: ${file.name}`)
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `upload-${Date.now()}`,
+                role: "user",
+                content: `Uploaded schematic file: ${file.name}`,
+                timestamp: new Date(),
+              },
+              {
+                id: `upload-response-${Date.now()}`,
+                role: "assistant",
+                content: `Successfully loaded schematic file "${file.name}". The schematic has been replaced in KiCad.`,
+                timestamp: new Date(),
+              },
+            ])
+          } else {
+            const errorMsg = resp?.error_message || "Unknown error"
+            addDebugLog("error", `Failed to upload schematic: ${errorMsg}`)
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `upload-${Date.now()}`,
+                role: "user",
+                content: `Tried to upload schematic file: ${file.name}`,
+                timestamp: new Date(),
+              },
+              {
+                id: `upload-response-${Date.now()}`,
+                role: "assistant",
+                content: `Failed to upload schematic file: ${errorMsg}. Please try using KiCad's File > Open menu instead.`,
+                timestamp: new Date(),
+              },
+            ])
+          }
+        } catch (err: any) {
+          addDebugLog("error", `Failed to process file: ${err.message}`)
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `upload-error-${Date.now()}`,
+              role: "assistant",
+              content: `Error uploading file: ${err.message}. Please try using KiCad's File > Open menu instead.`,
+              timestamp: new Date(),
+            },
+          ])
+        } finally {
+          setIsUploading(false)
+        }
+      }
+      reader.onerror = () => {
+        addDebugLog("error", "Failed to read file")
+        setIsUploading(false)
+      }
+      reader.readAsArrayBuffer(file)
+    } catch (err: any) {
+      addDebugLog("error", `Failed to read file: ${err.message}`)
+      setIsUploading(false)
+    }
+  }, [addDebugLog, setMessages, sendRpcCommand])
+
+  const handleFileSelect = React.useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleUploadSchematic(file)
+    }
+    // Reset the input so the same file can be selected again
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }, [handleUploadSchematic])
 
   // Extract user ID from JWT token or generate one
   const getUserId = (): string => {
@@ -2010,6 +2110,23 @@ export function ChatWindow() {
           </div>
         )}
         <div className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".kicad_sch,.sch"
+            onChange={handleFileSelect}
+            className="hidden"
+            id="schematic-file-input"
+          />
+          <Button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isUploading}
+            variant="outline"
+            className="h-9 px-3 border-[#2C333D] bg-[#151A21] text-[#E7E9EC] hover:bg-[#1C222B]"
+            title="Upload schematic file"
+          >
+            <Upload className={`h-3.5 w-3.5 ${isUploading ? "animate-spin" : ""}`} />
+          </Button>
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
