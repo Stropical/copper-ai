@@ -1015,6 +1015,46 @@ private:
                                 wxString* aErrorMsg = nullptr );
 
     /**
+     * Highlight schematic changes after a file replacement.
+     * Shows added items with green highlighting and displays a review dialog.
+     * 
+     * @param aAddedItems are the items that were added to the schematic
+     * @param aRemovedCount is the number of items that were removed
+     */
+    void HighlightSchematicChanges( const std::vector<SCH_ITEM*>& aAddedItems, size_t aRemovedCount );
+
+    /**
+     * Show a review dialog for schematic changes with Keep All/Undo options.
+     * 
+     * @param aAddedCount is the number of items added
+     * @param aRemovedCount is the number of items removed
+     * @return true if user clicked "Keep All", false if "Undo"
+     */
+    bool ShowSchematicChangeReviewDialog( size_t aAddedCount, size_t aRemovedCount );
+
+    /**
+     * Clear change highlighting from all items.
+     */
+    void ClearChangeHighlighting();
+
+    /**
+     * Accept pending schematic changes (keep the changes).
+     */
+    void AcceptSchematicChanges();
+
+    /**
+     * Reject pending schematic changes (undo and revert).
+     */
+    void RejectSchematicChanges();
+
+    /**
+     * Notify the frontend (agent panel) about pending changes.
+     * @param aAddedCount is the number of items added
+     * @param aRemovedCount is the number of items removed
+     */
+    void NotifyFrontendPendingChanges( size_t aAddedCount, size_t aRemovedCount );
+
+    /**
      * Save \a aSheet to a schematic file.
      *
      * @param aSheet is the #SCH_SHEET object to save.
@@ -1098,6 +1138,11 @@ private:
     bool                        m_crossProbeFlashing = false;
     bool                        m_show_search;
     bool                        m_highlightedConnChanged;
+
+    // Change review tracking
+    std::vector<SCH_ITEM*>      m_highlightedChangeItems;  ///< Items currently highlighted as changes
+    size_t                      m_pendingChangesAdded;     ///< Number of items added (pending review)
+    size_t                      m_pendingChangesRemoved;   ///< Number of items removed (pending review)
 
     std::vector<wxEvtHandler*>  m_schematicChangeListeners;
 

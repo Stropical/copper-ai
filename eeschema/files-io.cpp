@@ -85,8 +85,15 @@
 #include <wx_filename.h>  // For ::ResolvePossibleSymlinks
 #include <widgets/wx_progress_reporters.h>
 #include <widgets/wx_html_report_box.h>
+#include <view/view.h>
+#include <gal/painter.h>
+#include "sch_painter.h"
+#include <widgets/webview_panel.h>
+#include <nlohmann/json.hpp>
 
 #include <kiplatform/io.h>
+
+using json = nlohmann::json;
 
 #include "widgets/filedlg_hook_save_project.h"
 #include "widgets/panel_remote_symbol.h"
@@ -1684,7 +1691,65 @@ bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
     // Create commit object
     SCH_COMMIT commit( this );
     
-    // Step 1: Collect all existing items to remove (excluding sheet pins and fields)
+    // Step 1: Create signatures of existing items BEFORE removal (to compare later)
+    // Use a combination of type + position + identifying properties as the signature
+    struct ItemSignature
+    {
+        KICAD_T           type;
+        VECTOR2I          position;
+        wxString          identifier;  // Reference for symbols, text for labels, etc.
+        
+        bool operator<( const ItemSignature& other ) const
+        {
+            if( type != other.type ) return type < other.type;
+            if( position != other.position ) return position.x < other.position.x || ( position.x == other.position.x && position.y < other.position.y );
+            return identifier < other.identifier;
+        }
+    };
+    
+    std::set<ItemSignature> existingSignatures;
+    for( SCH_ITEM* item : currentScreen->Items() )
+    {
+        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+        {
+            ItemSignature sig;
+            sig.type = item->Type();
+            sig.position = item->GetPosition();
+            
+            // Get identifying string based on item type
+            if( item->Type() == SCH_SYMBOL_T )
+            {
+                SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+                sig.identifier = symbol->GetField( FIELD_T::REFERENCE )->GetText();
+            }
+            else if( item->Type() == SCH_LABEL_LOCATE_ANY_T )
+            {
+                SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( item );
+                sig.identifier = label->GetText();
+            }
+            else if( item->Type() == SCH_TEXT_T )
+            {
+                SCH_TEXT* text = static_cast<SCH_TEXT*>( item );
+                sig.identifier = text->GetText();
+            }
+            else if( item->Type() == SCH_LINE_T )
+            {
+                SCH_LINE* line = static_cast<SCH_LINE*>( item );
+                sig.identifier = wxString::Format( "%d,%d-%d,%d", 
+                    line->GetStartPoint().x, line->GetStartPoint().y,
+                    line->GetEndPoint().x, line->GetEndPoint().y );
+            }
+            // For other types, just use UUID as identifier
+            else
+            {
+                sig.identifier = item->m_Uuid.AsString();
+            }
+            
+            existingSignatures.insert( sig );
+        }
+    }
+    
+    // Step 2: Collect all existing items to remove (excluding sheet pins and fields)
     std::vector<SCH_ITEM*> itemsToRemove;
     for( SCH_ITEM* item : currentScreen->Items() )
     {
@@ -1695,7 +1760,7 @@ bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
         }
     }
     
-    // Step 2: Stage all removals
+    // Step 3: Stage all removals
     for( SCH_ITEM* item : itemsToRemove )
     {
         commit.Remove( item, currentScreen );
@@ -1818,10 +1883,57 @@ bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
         // Step 7: Push the commit to apply all changes
         commit.Push( _( "Replace Schematic" ), aCommitFlags );
         
-        // Step 8: Update local lib symbol links (uses the map we just populated)
+        // Step 8: Track ONLY the newly added items by comparing with original signatures
+        // Items that don't match any existing signature are truly new
+        std::vector<SCH_ITEM*> addedItems;
+        for( SCH_ITEM* item : currentScreen->Items() )
+        {
+            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+            {
+                ItemSignature newSig;
+                newSig.type = item->Type();
+                newSig.position = item->GetPosition();
+                
+                // Get identifying string based on item type
+                if( item->Type() == SCH_SYMBOL_T )
+                {
+                    SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+                    newSig.identifier = symbol->GetField( FIELD_T::REFERENCE )->GetText();
+                }
+                else if( item->Type() == SCH_LABEL_LOCATE_ANY_T )
+                {
+                    SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( item );
+                    newSig.identifier = label->GetText();
+                }
+                else if( item->Type() == SCH_TEXT_T )
+                {
+                    SCH_TEXT* text = static_cast<SCH_TEXT*>( item );
+                    newSig.identifier = text->GetText();
+                }
+                else if( item->Type() == SCH_LINE_T )
+                {
+                    SCH_LINE* line = static_cast<SCH_LINE*>( item );
+                    newSig.identifier = wxString::Format( "%d,%d-%d,%d", 
+                        line->GetStartPoint().x, line->GetStartPoint().y,
+                        line->GetEndPoint().x, line->GetEndPoint().y );
+                }
+                else
+                {
+                    newSig.identifier = item->m_Uuid.AsString();
+                }
+                
+                // Only highlight items that don't exist in the original schematic
+                if( existingSignatures.find( newSig ) == existingSignatures.end() )
+                {
+                    addedItems.push_back( item );
+                }
+            }
+        }
+        
+        // Step 10: Update local lib symbol links (uses the map we just populated)
         currentScreen->UpdateLocalLibSymbolLinks();
         
-        // Step 7: Update the schematic hierarchy and connectivity
+        // Step 11: Update the schematic hierarchy and connectivity
         schematic->RefreshHierarchy();
         
         // Recalculate connections with global cleanup since we replaced everything
@@ -1830,8 +1942,8 @@ bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
         // Update sheet references
         GetCurrentSheet().UpdateAllScreenReferences();
         
-        // Refresh the canvas
-        GetCanvas()->Refresh();
+        // Step 12: Highlight ONLY the changed items (not everything)
+        HighlightSchematicChanges( addedItems, itemsToRemove.size() );
         
         // Update hierarchy navigator
         UpdateHierarchyNavigator( false, true );
@@ -1904,4 +2016,153 @@ bool SCH_EDIT_FRAME::AskToSaveChanges()
     }
 
     return true;
+}
+
+
+void SCH_EDIT_FRAME::HighlightSchematicChanges( const std::vector<SCH_ITEM*>& aAddedItems, size_t aRemovedCount )
+{
+    KIGFX::VIEW* view = GetCanvas()->GetView();
+    
+    // Store the list of highlighted items for later clearing
+    m_highlightedChangeItems.clear();
+    
+    // Collect UUIDs of all added items (including children) for green highlighting
+    std::set<KIID> addedItemUUIDs;
+    
+    // Highlight ONLY added items with brightened state (will show as highlighted)
+    for( SCH_ITEM* item : aAddedItems )
+    {
+        if( item )
+        {
+            item->SetBrightened();
+            m_highlightedChangeItems.push_back( item );
+            addedItemUUIDs.insert( item->m_Uuid );
+            view->Update( item, KIGFX::VIEW_UPDATE_FLAGS::REPAINT );
+            
+            // Also highlight children (pins, fields) for symbols and sheets
+            if( item->Type() == SCH_SYMBOL_T || item->Type() == SCH_SHEET_T )
+            {
+                item->RunOnChildren(
+                    [&]( SCH_ITEM* child )
+                    {
+                        child->SetBrightened();
+                        m_highlightedChangeItems.push_back( child );
+                        addedItemUUIDs.insert( child->m_Uuid );
+                        view->Update( child, KIGFX::VIEW_UPDATE_FLAGS::REPAINT );
+                    },
+                    RECURSE_MODE::NO_RECURSE );
+            }
+        }
+    }
+    
+    // Tell the painter about added item UUIDs so it can render them green
+    if( KIGFX::PAINTER* painter = GetCanvas()->GetView()->GetPainter() )
+    {
+        if( KIGFX::SCH_PAINTER* schPainter = dynamic_cast<KIGFX::SCH_PAINTER*>( painter ) )
+        {
+            schPainter->SetAddedChangeItemUUIDs( addedItemUUIDs );
+        }
+    }
+    
+    // Force a full refresh to ensure highlighting is visible
+    GetCanvas()->ForceRefresh();
+    
+    // Don't show dialog - UI buttons will handle accept/reject
+    // Store change counts for UI display
+    m_pendingChangesAdded = aAddedItems.size();
+    m_pendingChangesRemoved = aRemovedCount;
+    
+    // Notify the frontend about pending changes so it can show the buttons
+    // Only notify if there are actual changes
+    if( aAddedItems.size() > 0 || aRemovedCount > 0 )
+    {
+        NotifyFrontendPendingChanges( aAddedItems.size(), aRemovedCount );
+    }
+}
+
+
+bool SCH_EDIT_FRAME::ShowSchematicChangeReviewDialog( size_t aAddedCount, size_t aRemovedCount )
+{
+    // This method is kept for API compatibility but no longer shows a dialog
+    // The UI buttons in the agent panel will handle accept/reject via RPC
+    return true;
+}
+
+
+void SCH_EDIT_FRAME::ClearChangeHighlighting()
+{
+    KIGFX::VIEW* view = GetCanvas()->GetView();
+    
+    // Clear brightened state only from tracked highlighted items
+    for( SCH_ITEM* item : m_highlightedChangeItems )
+    {
+        if( item && item->IsBrightened() )
+        {
+            item->ClearBrightened();
+            view->Update( item, KIGFX::VIEW_UPDATE_FLAGS::REPAINT );
+        }
+    }
+    
+    // Clear the painter's added item UUIDs set
+    if( KIGFX::PAINTER* painter = GetCanvas()->GetView()->GetPainter() )
+    {
+        if( KIGFX::SCH_PAINTER* schPainter = dynamic_cast<KIGFX::SCH_PAINTER*>( painter ) )
+        {
+            schPainter->ClearAddedChangeItemUUIDs();
+        }
+    }
+    
+    m_highlightedChangeItems.clear();
+    m_pendingChangesAdded = 0;
+    m_pendingChangesRemoved = 0;
+    
+    GetCanvas()->Refresh();
+}
+
+
+void SCH_EDIT_FRAME::AcceptSchematicChanges()
+{
+    // Clear highlighting - changes are already applied and accepted
+    ClearChangeHighlighting();
+}
+
+
+void SCH_EDIT_FRAME::RejectSchematicChanges()
+{
+    // Clear highlighting first
+    ClearChangeHighlighting();
+    
+    // Undo the changes by rolling back from undo stack
+    RollbackSchematicFromUndo();
+}
+
+
+void SCH_EDIT_FRAME::NotifyFrontendPendingChanges( size_t aAddedCount, size_t aRemovedCount )
+{
+    // Notify the frontend (agent panel) about pending changes
+    if( !m_ollamaAgentPane || !dynamic_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane ) )
+        return;
+
+    WEBVIEW_PANEL* webviewPanel = static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane );
+    if( webviewPanel->HasLoadError() )
+        return;
+
+    // Send a notification message (not an RPC response) to inform the frontend
+    auto sanitizeForScript = []( const std::string& aJsonStr ) -> wxString
+    {
+        wxString s = wxString::FromUTF8( aJsonStr.c_str() );
+        s.Replace( "\\", "\\\\" );
+        s.Replace( "'", "\\'" );
+        return s;
+    };
+
+    json notification = json::object();
+    notification["type"] = "PENDING_CHANGES_NOTIFICATION";
+    notification["added"] = aAddedCount;
+    notification["removed"] = aRemovedCount;
+
+    wxString script = wxString::Format(
+            wxS( "if( window.kiclient && window.kiclient.postMessage ) { window.kiclient.postMessage('%s'); }" ),
+            sanitizeForScript( notification.dump() ) );
+    webviewPanel->RunScriptAsync( script );
 }

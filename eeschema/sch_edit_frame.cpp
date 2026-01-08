@@ -184,6 +184,8 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
         m_netNavigatorFilterValue(),
         m_netNavigatorMenuNetName(),
         m_highlightedConnChanged( false ),
+        m_pendingChangesAdded( 0 ),
+        m_pendingChangesRemoved( 0 ),
         m_designBlocksPane( nullptr ),
         m_remoteSymbolPane( nullptr ),
         m_currentVariantCtrl( nullptr )
@@ -3188,6 +3190,26 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
                                     response["error_message"] = "Unknown exception occurred";
                                 }
                             }
+                        }
+                        else if( command == "ACCEPT_SCHEMATIC_CHANGES" )
+                        {
+                            AcceptSchematicChanges();
+                            response["status"] = "OK";
+                            response["data"] = _( "Changes accepted" ).ToUTF8().data();
+                        }
+                        else if( command == "REJECT_SCHEMATIC_CHANGES" )
+                        {
+                            RejectSchematicChanges();
+                            response["status"] = "OK";
+                            response["data"] = _( "Changes rejected" ).ToUTF8().data();
+                        }
+                        else if( command == "GET_PENDING_CHANGES" )
+                        {
+                            response["status"] = "OK";
+                            json changeInfo = json::object();
+                            changeInfo["added"] = m_pendingChangesAdded;
+                            changeInfo["removed"] = m_pendingChangesRemoved;
+                            response["data"] = changeInfo;
                         }
                         else
                         {

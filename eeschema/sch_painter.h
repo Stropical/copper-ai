@@ -29,6 +29,8 @@
 
 #include <sch_render_settings.h>
 #include <sch_symbol.h>
+#include <set>
+#include <kiid.h>
 
 #include <gal/painter.h>
 
@@ -77,6 +79,12 @@ public:
     virtual SCH_RENDER_SETTINGS* GetSettings() override { return &m_schSettings; }
 
     void SetSchematic( SCHEMATIC* aSchematic ) { m_schematic = aSchematic; }
+
+    /// Set the set of UUIDs for items that should be highlighted as "added changes" (green)
+    void SetAddedChangeItemUUIDs( const std::set<KIID>& aUUIDs ) { m_addedChangeItemUUIDs = aUUIDs; }
+    
+    /// Clear the set of added change item UUIDs
+    void ClearAddedChangeItemUUIDs() { m_addedChangeItemUUIDs.clear(); }
 
 private:
     void drawItemBoundingBox( const EDA_ITEM* aItem );
@@ -149,6 +157,7 @@ public:
 private:
     SCH_RENDER_SETTINGS m_schSettings;
     SCHEMATIC*          m_schematic;
+    std::set<KIID>      m_addedChangeItemUUIDs;  ///< UUIDs of items highlighted as "added changes"
 };
 
 }; // namespace KIGFX

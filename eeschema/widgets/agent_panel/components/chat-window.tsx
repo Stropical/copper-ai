@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToolCallComponent, ToolCall } from "@/components/tool-call"
-import { Send, User, Bot, Sparkles, Check, X, Upload } from "lucide-react"
+import { Send, User, Bot, Sparkles, Check, X, Upload, CheckCircle2, XCircle } from "lucide-react"
 import { Streamdown } from "streamdown"
 import JSZip from "jszip"
 
@@ -72,6 +72,7 @@ export function ChatWindow() {
   const [debugLogs, setDebugLogs] = React.useState<Array<{ time: string; level: string; message: string }>>([])
   const [showDebugConsole, setShowDebugConsole] = React.useState(false)
   const [isUploading, setIsUploading] = React.useState(false)
+  const [pendingChanges, setPendingChanges] = React.useState<{ added: number; removed: number } | null>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const queuedPromptRef = React.useRef<string | null>(null)
@@ -350,6 +351,15 @@ export function ChatWindow() {
       try {
         const payload = typeof incoming === "string" ? JSON.parse(incoming) : incoming
         if (!payload || typeof payload !== "object") return
+
+        // Handle pending changes notification (not an RPC response)
+        if (payload.type === "PENDING_CHANGES_NOTIFICATION") {
+          setPendingChanges({
+            added: payload.added || 0,
+            removed: payload.removed || 0,
+          })
+          return
+        }
 
         const responseTo = payload.response_to
         if (typeof responseTo === "number") {
@@ -1559,7 +1569,7 @@ export function ChatWindow() {
               const schematicPath = data.schematic_file.trim()
               addDebugLog("log", `Server sent schematic file path: ${schematicPath}`)
               
-              // Automatically apply the schematic
+              // Apply the schematic (will highlight changes and show buttons)
               setTimeout(async () => {
                 try {
                   const replaceResp = await sendRpcCommand("REPLACE_SCHEMATIC", {
@@ -1570,12 +1580,24 @@ export function ChatWindow() {
                   
                   if (replaceResp?.status === "OK") {
                     addDebugLog("log", `✅ Successfully applied schematic from agent: ${schematicPath}`)
+                    
+                    // Get pending changes count to show buttons
+                    try {
+                      const changesResp = await sendRpcCommand("GET_PENDING_CHANGES", {})
+                      if (changesResp?.status === "OK" && changesResp.data) {
+                        setPendingChanges(changesResp.data as { added: number; removed: number })
+                        addDebugLog("log", `Pending changes: ${changesResp.data.added} added, ${changesResp.data.removed} removed`)
+                      }
+                    } catch (e) {
+                      // Ignore - changes might not be tracked yet
+                    }
+                    
                     setMessages((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantMessageId
                           ? {
                               ...msg,
-                              content: `${msg.content}\n\n✅ Schematic applied from agent directory.`,
+                              content: `${msg.content}\n\n✅ Schematic changes applied. Review and click Apply or Discard.`,
                             }
                           : msg
                       )
@@ -1583,7 +1605,6 @@ export function ChatWindow() {
                   } else {
                     const errorMsg = replaceResp?.error_message || "Unknown error"
                     addDebugLog("warn", `Failed to apply schematic: ${errorMsg}`)
-                    // Show error to user in chat
                     setMessages((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantMessageId
@@ -1598,7 +1619,6 @@ export function ChatWindow() {
                 } catch (e: any) {
                   const errorMsg = e?.message || "Unknown error"
                   addDebugLog("error", `Error applying schematic: ${errorMsg}`)
-                  // Show error to user in chat
                   setMessages((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantMessageId
@@ -1610,7 +1630,7 @@ export function ChatWindow() {
                     )
                   )
                 }
-              }, 100) // Small delay to ensure message is processed first
+              }, 100)
             }
 
             // Parse plan/todos from the response
@@ -2127,6 +2147,48 @@ export function ChatWindow() {
           >
             <Upload className={`h-3.5 w-3.5 ${isUploading ? "animate-spin" : ""}`} />
           </Button>
+          {pendingChanges && (
+            <>
+              <Button
+                onClick={async () => {
+                  try {
+                    const resp = await sendRpcCommand("ACCEPT_SCHEMATIC_CHANGES", {})
+                    if (resp?.status === "OK") {
+                      setPendingChanges(null)
+                      addDebugLog("log", "✅ Changes accepted")
+                    }
+                  } catch (e: any) {
+                    addDebugLog("error", `Failed to accept changes: ${e?.message}`)
+                  }
+                }}
+                variant="outline"
+                className="h-9 px-3 border-green-600 bg-green-600/10 text-green-400 hover:bg-green-600/20"
+                title={`Apply changes (${pendingChanges.added} added, ${pendingChanges.removed} removed)`}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                Apply
+              </Button>
+              <Button
+                onClick={async () => {
+                  try {
+                    const resp = await sendRpcCommand("REJECT_SCHEMATIC_CHANGES", {})
+                    if (resp?.status === "OK") {
+                      setPendingChanges(null)
+                      addDebugLog("log", "❌ Changes rejected")
+                    }
+                  } catch (e: any) {
+                    addDebugLog("error", `Failed to reject changes: ${e?.message}`)
+                  }
+                }}
+                variant="outline"
+                className="h-9 px-3 border-red-600 bg-red-600/10 text-red-400 hover:bg-red-600/20"
+                title="Discard changes"
+              >
+                <XCircle className="h-3.5 w-3.5 mr-1" />
+                Discard
+              </Button>
+            </>
+          )}
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}

@@ -69,6 +69,8 @@
 #include <string_utils.h>
 #include "sch_painter.h"
 #include "common.h"
+#include <set>
+#include <kiid.h>
 
 #include "symb_transforms_utils.h"
 
@@ -448,18 +450,37 @@ COLOR4D SCH_PAINTER::getRenderColor( const SCH_ITEM* aItem, int aLayer, bool aDr
 
     if( aItem->IsBrightened() ) // Selection disambiguation, net highlighting, etc.
     {
-        color = m_schSettings.GetLayerColor( LAYER_BRIGHTENED );
+        // Check if this item is in the "added changes" set - if so, render in green
+        if( m_addedChangeItemUUIDs.count( aItem->m_Uuid ) > 0 )
+        {
+            // Green highlight for added items - using a vibrant but visible green
+            color = COLOR4D( 0.0, 0.85, 0.0, 1.0 ); // Bright green for additions
 
-        if( aDrawingShadows )
-        {
-            if( aItem->IsSelected() )
-                color = m_schSettings.GetLayerColor( LAYER_SELECTION_SHADOWS );
-            else
+            if( aDrawingShadows )
+            {
                 color = color.WithAlpha( 0.15 );
+            }
+            else if( isBackgroundLayer( aLayer ) )
+            {
+                color = color.WithAlpha( 0.2 );
+            }
         }
-        else if( isBackgroundLayer( aLayer ) )
+        else
         {
-            color = color.WithAlpha( 0.2 );
+            // Normal brightened color for other highlighted items
+            color = m_schSettings.GetLayerColor( LAYER_BRIGHTENED );
+
+            if( aDrawingShadows )
+            {
+                if( aItem->IsSelected() )
+                    color = m_schSettings.GetLayerColor( LAYER_SELECTION_SHADOWS );
+                else
+                    color = color.WithAlpha( 0.15 );
+            }
+            else if( isBackgroundLayer( aLayer ) )
+            {
+                color = color.WithAlpha( 0.2 );
+            }
         }
     }
     else if( aItem->IsSelected() && aDrawingShadows )
