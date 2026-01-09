@@ -22,7 +22,7 @@ macro(check_banned_functions)
     foreach(dir IN LISTS BANNED_DIRS)
         message(STATUS "Checking for banned functions in: ${dir}")
         file(GLOB_RECURSE found_files
-            RELATIVE ${CMAKE_SOURCE_DIR}
+            LIST_DIRECTORIES false
             ${dir}/*.c
             ${dir}/*.cpp
             ${dir}/*.h
@@ -32,20 +32,30 @@ macro(check_banned_functions)
     endforeach()
 
     foreach(file ${BANNED_SCAN_FILES})
+        set(file_path "${file}")
+        if(NOT IS_ABSOLUTE "${file_path}")
+            set(file_path "${CMAKE_SOURCE_DIR}/${file_path}")
+        endif()
+
+        set(display_path "${file_path}")
+        if(IS_ABSOLUTE "${file_path}")
+            file(RELATIVE_PATH display_path "${CMAKE_SOURCE_DIR}" "${file_path}")
+        endif()
+
         # Read file into lines using file(STRINGS)
-        file(STRINGS ${CMAKE_SOURCE_DIR}/${file} file_lines)
+        file(STRINGS "${file_path}" file_lines)
 
         foreach(line IN LISTS file_lines)
             foreach(func ${BANNED_FUNCTIONS})
                 if(line MATCHES "\\b${func}\\b")
-                    message(FATAL_ERROR "Banned function '${func}' found in ${file}")
+                    message(FATAL_ERROR "Banned function '${func}' found in ${display_path}")
                 endif()
             endforeach()
             # Only error if the line does not end with //format:allow (allow spaces between // and format)
             # we allow this for specific cases where the format specifier is needed because the
             # string is shown to the user and needs to be formatted in their locale e.g. error messages
             if(line MATCHES "%[0-9]*\\.?[0-9]*[fg]" AND NOT line MATCHES "format:allow")
-                message(FATAL_ERROR "Banned format specifier '%f' or '%g' found in ${file}")
+                message(FATAL_ERROR "Banned format specifier '%f' or '%g' found in ${display_path}")
             endif()
         endforeach()
     endforeach()
