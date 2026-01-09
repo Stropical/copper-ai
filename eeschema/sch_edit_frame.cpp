@@ -65,6 +65,7 @@
 #include <wx/dir.h>
 #include <wx/wfstream.h>
 #include <wx/ffile.h>
+#include <wx/stdpaths.h>
 #include <python_scripting.h>
 #include <sch_edit_frame.h>
 #include <symbol_chooser_frame.h>
@@ -3010,6 +3011,114 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
                             wxString projectPath = Prj().GetProjectPath();
                             response["status"] = "OK";
                             response["data"] = projectPath.ToUTF8().data();
+                        }
+                        else if( command == "ZIP_PROJECT" )
+                        {
+                            wxString projectPath = Prj().GetProjectPath();
+                            
+                            // Allow override via parameters
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+                                if( params.contains( "project_path" ) && params["project_path"].is_string() )
+                                {
+                                    wxString paramPath = wxString::FromUTF8( params["project_path"].get<std::string>().c_str() );
+                                    if( !paramPath.IsEmpty() && wxFileName::DirExists( paramPath ) )
+                                        projectPath = paramPath;
+                                }
+                            }
+                            
+                            if( projectPath.IsEmpty() || !wxFileName::DirExists( projectPath ) )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "No project path available or project directory does not exist";
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    // Create temporary zip file
+                                    wxString tempDir = wxStandardPaths::Get().GetTempDir();
+                                    wxString tempZipFile = wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + "kicad_project_" );
+                                    
+                                    // Create zip file extension
+                                    if( wxFileExists( tempZipFile ) )
+                                        wxRemoveFile( tempZipFile );
+                                    wxFileName tempZipFn( tempZipFile );
+                                    tempZipFn.SetExt( "zip" );
+                                    tempZipFile = tempZipFn.GetFullPath();
+                                    
+                                    // Create zip output stream
+                                    wxFFileOutputStream fileStream( tempZipFile );
+                                    if( !fileStream.IsOk() )
+                                    {
+                                        response["status"] = "ERROR";
+                                        response["error_message"] = "Failed to create temporary zip file";
+                                    }
+                                    else
+                                    {
+                                        wxZipOutputStream zipStream( fileStream );
+                                        wxString errors;
+                                        
+                                        // Add entire project directory to zip
+                                        if( !AddDirectoryToZip( zipStream, projectPath, errors, wxEmptyString ) )
+                                        {
+                                            zipStream.Close();
+                                            fileStream.Close();
+                                            if( wxFileExists( tempZipFile ) )
+                                                wxRemoveFile( tempZipFile );
+                                            
+                                            response["status"] = "ERROR";
+                                            wxString errorMsg = _( "Failed to zip project directory: " ) + errors;
+                                            response["error_message"] = errorMsg.ToUTF8().data();
+                                        }
+                                        else
+                                        {
+                                            zipStream.Close();
+                                            fileStream.Close();
+                                            
+                                            // Read zip file and encode as base64
+                                            wxFFile zipFile( tempZipFile, "rb" );
+                                            if( !zipFile.IsOpened() )
+                                            {
+                                                if( wxFileExists( tempZipFile ) )
+                                                    wxRemoveFile( tempZipFile );
+                                                
+                                                response["status"] = "ERROR";
+                                                response["error_message"] = "Failed to read temporary zip file";
+                                            }
+                                            else
+                                            {
+                                                wxFileOffset zipSize = zipFile.Length();
+                                                wxMemoryBuffer zipBuffer( zipSize );
+                                                zipFile.Read( zipBuffer.GetWriteBuf( zipSize ), zipSize );
+                                                zipBuffer.UngetWriteBuf( zipSize );
+                                                zipFile.Close();
+                                                
+                                                // Encode as base64
+                                                wxString base64Zip = wxBase64Encode( zipBuffer );
+                                                
+                                                // Clean up temp file
+                                                if( wxFileExists( tempZipFile ) )
+                                                    wxRemoveFile( tempZipFile );
+                                                
+                                                response["status"] = "OK";
+                                                response["data"] = base64Zip.ToUTF8().data();
+                                            }
+                                        }
+                                    }
+                                }
+                                catch( const std::exception& e )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = std::string( "Exception while creating zip: " ) + e.what();
+                                }
+                                catch( ... )
+                                {
+                                    response["status"] = "ERROR";
+                                    response["error_message"] = "Unknown exception while creating zip";
+                                }
+                            }
                         }
                         else if( command == "REPLACE_SCHEMATIC_FROM_DATA" )
                         {
