@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WEBSITE_DIR="$SCRIPT_DIR/PRIVATE/copper-ai-private/website"
 RAG_DIR="$SCRIPT_DIR/PRIVATE/copper-ai-private/pcb_agent"
-AGENT_PANEL_DIR="$SCRIPT_DIR/eeschema/widgets/agent_panel"
+AGENT_PANEL_DIR="$SCRIPT_DIR/PRIVATE/copper-ai-private/agent_panel"
 ROUTER_SERVER_DIR="$SCRIPT_DIR/PRIVATE/copper-ai-private/router_server"
 
 # Validate paths
@@ -79,7 +79,7 @@ SCRIPT2
 
     # Script 3: agent_panel
     cat > "$SCRIPT_DIR/.dev-scripts/3-agent.sh" << 'SCRIPT3'
-cd "$(dirname "$0")/../eeschema/widgets/agent_panel"
+cd "$(dirname "$0")/../PRIVATE/copper-ai-private/agent_panel"
 npm install && npm run dev
 exec bash
 SCRIPT3

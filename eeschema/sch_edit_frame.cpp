@@ -780,8 +780,8 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
             
                 // Method 1: Relative to current working directory (for development)
                 htmlPath.AssignDir( wxGetCwd() );
-                htmlPath.AppendDir( wxS( "eeschema" ) );
-                htmlPath.AppendDir( wxS( "widgets" ) );
+                htmlPath.AppendDir( wxS( "PRIVATE" ) );
+                htmlPath.AppendDir( wxS( "copper-ai-private" ) );
                 htmlPath.AppendDir( wxS( "agent_panel" ) );
                 htmlPath.AppendDir( wxS( "out" ) );
                 htmlPath.SetFullName( wxS( "index.html" ) );
@@ -795,15 +795,19 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                 {
                     // Method 2: Relative to source file location (__FILE__)
                     // __FILE__ is typically: .../eeschema/sch_edit_frame.cpp
-                    // We want: .../eeschema/widgets/agent_panel/out/index.html
+                    // We want: .../PRIVATE/copper-ai-private/agent_panel/out/index.html
                     wxString sourceFile( wxS( __FILE__ ) );
                     htmlPath.Assign( sourceFile );
                     // htmlPath now points to .../eeschema/sch_edit_frame.cpp
-                    // We need to stay in eeschema/ directory and navigate to widgets/agent_panel/out/
+                    // We need to go up to root, then navigate to PRIVATE/copper-ai-private/agent_panel/out/
                     // Clear the filename but keep the directory (eeschema/)
                     htmlPath.SetName( wxEmptyString );
                     htmlPath.SetExt( wxEmptyString );
-                    htmlPath.AppendDir( wxS( "widgets" ) );
+                    // Go up from eeschema/ to root
+                    htmlPath.RemoveLastDir();
+                    // Navigate to PRIVATE/copper-ai-private/agent_panel/out/
+                    htmlPath.AppendDir( wxS( "PRIVATE" ) );
+                    htmlPath.AppendDir( wxS( "copper-ai-private" ) );
                     htmlPath.AppendDir( wxS( "agent_panel" ) );
                     htmlPath.AppendDir( wxS( "out" ) );
                     htmlPath.SetFullName( wxS( "index.html" ) );
@@ -845,7 +849,7 @@ SCH_EDIT_FRAME::SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
                 const wxString devUrlDisplay = hasEnvDevUrl ? escape( envDevUrl ) : notSet;
                 const wxString devFlagDisplay = hasEnvDevFlag ? escape( envDevFlag ) : notSet;
 
-                    wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Agent Panel</h1><p>Build the agent panel first:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd eeschema/widgets/agent_panel<br>npm run build</pre><p>Tried path: " ) 
+                    wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Agent Panel</h1><p>Build the agent panel first:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd PRIVATE/copper-ai-private/agent_panel<br>npm run build</pre><p>Tried path: " ) 
                                   + htmlPath.GetFullPath() 
                               + wxS( "</p>" )
                               + wxS( "<hr style='border:0;border-top:1px solid #22272F;margin:16px 0;'/>" )
