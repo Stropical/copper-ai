@@ -25,6 +25,8 @@
  */
 
 
+#include <algorithm>
+#include <vector>
 #include <confirm.h>
 #include <common.h>
 #include <connection_graph.h>
@@ -75,9 +77,304 @@
 #include <drawing_sheet/ds_data_model.h>
 #include <wx/app.h>
 #include <wx/ffile.h>
+#include <wx/file.h>
 #include <wx/filedlg.h>
+#include <wx/filefn.h>
 #include <wx/log.h>
+#include <wx/regex.h>
 #include <wx/richmsgdlg.h>
+#include <wx/stdpaths.h>
+#include <wx/tokenzr.h>
+
+namespace
+{
+struct DIFF_HUNK
+{
+    long                oldStart = 0;
+    long                oldCount = 0;
+    long                newStart = 0;
+    long                newCount = 0;
+    std::vector<wxString> lines;
+};
+
+
+static void SplitTextIntoLines( const wxString& aText, std::vector<wxString>& aLines,
+                                bool* aEndsWithNewline )
+{
+    aLines.clear();
+    wxString currentLine;
+
+    for( size_t i = 0; i < aText.length(); ++i )
+    {
+        wxUniChar ch = aText[i];
+
+        if( ch == '\r' )
+            continue;
+
+        if( ch == '\n' )
+        {
+            aLines.emplace_back( currentLine );
+            currentLine.clear();
+        }
+        else
+        {
+            currentLine.Append( ch );
+        }
+    }
+
+    if( aText.IsEmpty() )
+    {
+        if( aEndsWithNewline )
+            *aEndsWithNewline = false;
+        return;
+    }
+
+    if( aText.Last() == '\n' )
+    {
+        if( aEndsWithNewline )
+            *aEndsWithNewline = true;
+
+        if( !currentLine.IsEmpty() )
+            aLines.emplace_back( currentLine );
+    }
+    else
+    {
+        if( aEndsWithNewline )
+            *aEndsWithNewline = false;
+
+        aLines.emplace_back( currentLine );
+    }
+}
+
+
+static void SplitDiffIntoLines( const wxString& aDiffText, std::vector<wxString>& aLines )
+{
+    aLines.clear();
+    wxStringTokenizer tokenizer( aDiffText, wxS( "\n" ), wxTOKEN_RET_EMPTY );
+
+    while( tokenizer.HasMoreTokens() )
+    {
+        wxString line = tokenizer.GetNextToken();
+
+        if( line.EndsWith( wxS( "\r" ) ) )
+            line.RemoveLast();
+
+        aLines.emplace_back( line );
+    }
+}
+
+
+static bool ApplyUnifiedDiffPatch( const wxString& aDiffText,
+                                   const std::vector<wxString>& aOriginalLines,
+                                   std::vector<wxString>& aResultLines,
+                                   wxString* aErrorMsg,
+                                   bool* aResultEndsWithNewline )
+{
+    aResultLines.clear();
+
+    std::vector<wxString> diffLines;
+    SplitDiffIntoLines( aDiffText, diffLines );
+
+    if( diffLines.empty() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Diff content is empty" );
+        return false;
+    }
+
+    wxRegEx hunkRegex( wxS( "^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*" ) );
+
+    if( !hunkRegex.IsValid() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Failed to initialize diff parser" );
+        return false;
+    }
+
+    std::vector<DIFF_HUNK> hunks;
+    size_t lineIndex = 0;
+
+    while( lineIndex < diffLines.size() )
+    {
+        const wxString& line = diffLines[lineIndex];
+
+        if( line.StartsWith( wxS( "@@" ) ) )
+        {
+            if( !hunkRegex.Matches( line ) )
+            {
+                if( aErrorMsg )
+                    *aErrorMsg = wxString::Format( _( "Invalid diff hunk header: %s" ), line );
+                return false;
+            }
+
+            DIFF_HUNK hunk;
+            wxString match;
+
+            match = hunkRegex.GetMatch( line, 1 );
+            match.ToLong( &hunk.oldStart );
+
+            match = hunkRegex.GetMatch( line, 2 );
+            if( !match.IsEmpty() )
+                match.ToLong( &hunk.oldCount );
+            else
+                hunk.oldCount = 1;
+
+            match = hunkRegex.GetMatch( line, 3 );
+            match.ToLong( &hunk.newStart );
+
+            match = hunkRegex.GetMatch( line, 4 );
+            if( !match.IsEmpty() )
+                match.ToLong( &hunk.newCount );
+            else
+                hunk.newCount = 1;
+
+            ++lineIndex;
+
+            wxUniChar lastPrefix = '\0';
+
+            while( lineIndex < diffLines.size() )
+            {
+                wxString hunkLine = diffLines[lineIndex];
+
+                if( hunkLine.StartsWith( wxS( "@@" ) ) )
+                    break;
+
+                if( hunkLine.StartsWith( wxS( "---" ) ) || hunkLine.StartsWith( wxS( "+++" ) ) )
+                {
+                    ++lineIndex;
+                    continue;
+                }
+
+                if( hunkLine.StartsWith( wxS( "\\ No newline at end of file" ) ) )
+                {
+                    if( lastPrefix == '+' && aResultEndsWithNewline )
+                        *aResultEndsWithNewline = false;
+
+                    ++lineIndex;
+                    continue;
+                }
+
+                if( hunkLine.IsEmpty() )
+                {
+                    if( aErrorMsg )
+                        *aErrorMsg = _( "Malformed diff line" );
+                    return false;
+                }
+
+                wxUniChar prefix = hunkLine[0];
+
+                if( prefix != ' ' && prefix != '+' && prefix != '-' )
+                    break;
+
+                hunk.lines.emplace_back( hunkLine );
+                lastPrefix = prefix;
+                ++lineIndex;
+            }
+
+            hunks.emplace_back( std::move( hunk ) );
+        }
+        else
+        {
+            ++lineIndex;
+        }
+    }
+
+    if( hunks.empty() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "No diff hunks found" );
+        return false;
+    }
+
+    size_t originalIndex = 0;
+    aResultLines.reserve( aOriginalLines.size() );
+
+    for( const DIFF_HUNK& hunk : hunks )
+    {
+        long targetStart = std::max( 1L, hunk.oldStart );
+        size_t targetIndex = targetStart > 0 ? static_cast<size_t>( targetStart - 1 ) : 0;
+
+        if( targetIndex < originalIndex )
+        {
+            if( aErrorMsg )
+                *aErrorMsg = _( "Diff hunks overlap" );
+            return false;
+        }
+
+        if( targetIndex > aOriginalLines.size() )
+            targetIndex = aOriginalLines.size();
+
+        while( originalIndex < targetIndex )
+            aResultLines.emplace_back( aOriginalLines[originalIndex++] );
+
+        for( const wxString& diffLine : hunk.lines )
+        {
+            if( diffLine.IsEmpty() )
+            {
+                if( aErrorMsg )
+                    *aErrorMsg = _( "Malformed diff line" );
+                return false;
+            }
+
+            wxUniChar prefix = diffLine[0];
+            wxString  content = diffLine.Mid( 1 );
+
+            switch( prefix.GetValue() )
+            {
+            case ' ':
+                if( originalIndex >= aOriginalLines.size() )
+                {
+                    if( aErrorMsg )
+                        *aErrorMsg = _( "Diff context exceeds file length" );
+                    return false;
+                }
+
+                if( aOriginalLines[originalIndex] != content )
+                {
+                    if( aErrorMsg )
+                        *aErrorMsg = _( "Diff context does not match the schematic" );
+                    return false;
+                }
+
+                aResultLines.emplace_back( aOriginalLines[originalIndex++] );
+                break;
+
+            case '-':
+                if( originalIndex >= aOriginalLines.size() )
+                {
+                    if( aErrorMsg )
+                        *aErrorMsg = _( "Diff removal exceeds file length" );
+                    return false;
+                }
+
+                if( aOriginalLines[originalIndex] != content )
+                {
+                    if( aErrorMsg )
+                        *aErrorMsg = _( "Diff removal line does not match the schematic" );
+                    return false;
+                }
+
+                ++originalIndex;
+                break;
+
+            case '+':
+                aResultLines.emplace_back( content );
+                break;
+
+            default:
+                if( aErrorMsg )
+                    *aErrorMsg = _( "Unexpected diff line format" );
+                return false;
+            }
+        }
+    }
+
+    while( originalIndex < aOriginalLines.size() )
+        aResultLines.emplace_back( aOriginalLines[originalIndex++] );
+
+    return true;
+}
+} // namespace
 #include <wx/stdpaths.h>
 #include <tools/sch_inspection_tool.h>
 #include <tools/sch_selection_tool.h>
@@ -1984,6 +2281,136 @@ bool SCH_EDIT_FRAME::ReplaceSchematicInRAM( const wxString& aFileName,
             *aErrorMsg = errorMsg;
         return false;
     }
+}
+
+
+bool SCH_EDIT_FRAME::ApplySchematicDiff( const wxString& aDiffText, int aCommitFlags,
+                                         wxString* aErrorMsg )
+{
+    if( aDiffText.IsEmpty() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Diff content is empty" );
+        return false;
+    }
+
+    wxString currentFileName = Schematic().GetFileName();
+
+    if( currentFileName.IsEmpty() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "No schematic file is currently loaded" );
+        return false;
+    }
+
+    wxFileName currentFile = Prj().AbsolutePath( currentFileName );
+    currentFile.MakeAbsolute();
+
+    if( !currentFile.FileExists() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "The current schematic file does not exist on disk" );
+        return false;
+    }
+
+    wxString tempDir = wxStandardPaths::Get().GetTempDir();
+    wxString tempBase = wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator()
+                                                        + wxS( "kicad_diff_" ) );
+
+    if( tempBase.IsEmpty() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Failed to create temporary file" );
+        return false;
+    }
+
+    if( wxFileExists( tempBase ) )
+        wxRemoveFile( tempBase );
+
+    wxFileName tempFileName( tempBase );
+    tempFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
+    wxString tempFilePath = tempFileName.GetFullPath();
+
+    if( !wxCopyFile( currentFile.GetFullPath(), tempFilePath, true ) )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Failed to copy schematic to temporary file" );
+        wxRemoveFile( tempFilePath );
+        return false;
+    }
+
+    wxString fileContent;
+
+    {
+        wxFFile tempInput( tempFilePath, "rb" );
+
+        if( !tempInput.IsOpened() || !tempInput.ReadAll( &fileContent ) )
+        {
+            if( aErrorMsg )
+                *aErrorMsg = _( "Failed to read schematic content" );
+
+            wxRemoveFile( tempFilePath );
+            return false;
+        }
+    }
+
+    bool originalEndsWithNewline = false;
+    std::vector<wxString> originalLines;
+    SplitTextIntoLines( fileContent, originalLines, &originalEndsWithNewline );
+
+    std::vector<wxString> patchedLines;
+    wxString patchError;
+    bool     patchedEndsWithNewline = originalEndsWithNewline;
+
+    if( !ApplyUnifiedDiffPatch( aDiffText, originalLines, patchedLines, &patchError,
+                                &patchedEndsWithNewline ) )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = patchError;
+        wxRemoveFile( tempFilePath );
+        return false;
+    }
+
+    bool useCRLF = fileContent.Find( wxS( "\r\n" ) ) != wxNOT_FOUND;
+    wxString newline = useCRLF ? wxS( "\r\n" ) : wxS( "\n" );
+    wxString patchedContent;
+
+    for( size_t i = 0; i < patchedLines.size(); ++i )
+    {
+        patchedContent << patchedLines[i];
+
+        if( i + 1 < patchedLines.size() || patchedEndsWithNewline )
+            patchedContent << newline;
+    }
+
+    wxFFile tempOut( tempFilePath, "wb" );
+
+    if( !tempOut.IsOpened() )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = _( "Failed to write patched schematic" );
+        wxRemoveFile( tempFilePath );
+        return false;
+    }
+
+    wxScopedCharBuffer buffer = patchedContent.ToUTF8();
+    tempOut.Write( buffer.data(), buffer.length() );
+    tempOut.Close();
+
+    wxString replaceError;
+    bool     replaced = ReplaceSchematicInRAM( tempFilePath, SCH_IO_MGR::SCH_FILE_UNKNOWN,
+                                               aCommitFlags, &replaceError );
+
+    wxRemoveFile( tempFilePath );
+
+    if( !replaced )
+    {
+        if( aErrorMsg )
+            *aErrorMsg = replaceError;
+        return false;
+    }
+
+    return true;
 }
 
 

@@ -1015,6 +1015,20 @@ private:
                                 wxString* aErrorMsg = nullptr );
 
     /**
+     * Apply a unified diff patch to the current schematic by creating a temporary file
+     * with the patched contents and then calling ReplaceSchematicInRAM() so that the
+     * standard SCH_COMMIT workflow handles the update.
+     *
+     * @param aDiffText Unified diff text describing the changes to apply.
+     * @param aCommitFlags Flags passed through to ReplaceSchematicInRAM (e.g., SKIP_UNDO).
+     * @param aErrorMsg Optional output error string.
+     * @return true if the diff was applied and committed successfully.
+     */
+    bool ApplySchematicDiff( const wxString& aDiffText,
+                             int aCommitFlags = 0,
+                             wxString* aErrorMsg = nullptr );
+
+    /**
      * Highlight schematic changes after a file replacement.
      * Shows added items with green highlighting and displays a review dialog.
      * 

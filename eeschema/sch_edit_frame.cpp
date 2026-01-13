@@ -3120,6 +3120,61 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
                                 }
                             }
                         }
+                        else if( command == "APPLY_SCHEMATIC_DIFF" )
+                        {
+                            std::string diffText;
+                            int commitFlags = 0;
+
+                            if( request.contains( "parameters" ) && request["parameters"].is_object() )
+                            {
+                                const json& params = request["parameters"];
+
+                                if( params.contains( "diff" ) && params["diff"].is_string() )
+                                    diffText = params["diff"].get<std::string>();
+                                else if( params.contains( "diff_text" ) && params["diff_text"].is_string() )
+                                    diffText = params["diff_text"].get<std::string>();
+                                else if( params.contains( "patch" ) && params["patch"].is_string() )
+                                    diffText = params["patch"].get<std::string>();
+
+                                if( params.contains( "skip_undo" ) && params["skip_undo"].is_boolean()
+                                    && params["skip_undo"].get<bool>() )
+                                {
+                                    commitFlags |= SKIP_UNDO;
+                                }
+
+                                if( params.contains( "skip_set_dirty" ) && params["skip_set_dirty"].is_boolean()
+                                    && params["skip_set_dirty"].get<bool>() )
+                                {
+                                    commitFlags |= SKIP_SET_DIRTY;
+                                }
+                            }
+
+                            if( diffText.empty() )
+                            {
+                                response["status"] = "ERROR";
+                                response["error_message"] = "Missing parameters.diff";
+                            }
+                            else
+                            {
+                                wxString errorMsg;
+                                bool success = ApplySchematicDiff( wxString::FromUTF8( diffText ),
+                                                                   commitFlags, &errorMsg );
+
+                                if( success )
+                                {
+                                    response["status"] = "OK";
+                                    response["data"] = _( "Diff applied successfully" ).ToUTF8().data();
+                                }
+                                else
+                                {
+                                    response["status"] = "ERROR";
+                                    if( !errorMsg.IsEmpty() )
+                                        response["error_message"] = errorMsg.ToUTF8().data();
+                                    else
+                                        response["error_message"] = "Failed to apply diff";
+                                }
+                            }
+                        }
                         else if( command == "REPLACE_SCHEMATIC_FROM_DATA" )
                         {
                             wxString filename;
