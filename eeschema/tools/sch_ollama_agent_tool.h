@@ -27,6 +27,9 @@
 #include <optional>
 #include <nlohmann/json.hpp>
 
+// Forward declaration
+class SCH_TOOL_HTTP_SERVER;
+
 class SCH_OLLAMA_AGENT_DIALOG;
 
 class SCH_EDIT_FRAME;
@@ -47,7 +50,7 @@ class SCH_OLLAMA_AGENT_TOOL : public SCH_TOOL_BASE<SCH_EDIT_FRAME>
 public:
 
     SCH_OLLAMA_AGENT_TOOL();
-    ~SCH_OLLAMA_AGENT_TOOL() override {}
+    ~SCH_OLLAMA_AGENT_TOOL() override;
 
     /// @copydoc TOOL_INTERACTIVE::Init()
     bool Init() override;
@@ -138,6 +141,7 @@ private:
     SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
     wxString m_lastToolError;
     wxString m_lastToolResult;
+    std::unique_ptr<class SCH_TOOL_HTTP_SERVER> m_httpServer;  // HTTP server for tool API
 };
 
 #endif // SCH_OLLAMA_AGENT_TOOL_H

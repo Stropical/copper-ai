@@ -70,6 +70,24 @@ WEBVIEW_PANEL::WEBVIEW_PANEL( wxWindow* aParent, wxWindowID aId, const wxPoint& 
 
 WEBVIEW_PANEL::~WEBVIEW_PANEL()
 {
+    // Unbind all event handlers before destruction to prevent callbacks
+    // from WebKit during shutdown from trying to process events on a destroyed object
+    if( m_browser )
+    {
+        Unbind( wxEVT_WEBVIEW_NAVIGATING, &WEBVIEW_PANEL::OnNavigationRequest, this, m_browser->GetId() );
+        Unbind( wxEVT_WEBVIEW_NEWWINDOW, &WEBVIEW_PANEL::OnNewWindow, this, m_browser->GetId() );
+        Unbind( wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &WEBVIEW_PANEL::OnScriptMessage, this, m_browser->GetId() );
+        Unbind( wxEVT_WEBVIEW_SCRIPT_RESULT, &WEBVIEW_PANEL::OnScriptResult, this, m_browser->GetId() );
+        Unbind( wxEVT_WEBVIEW_ERROR, &WEBVIEW_PANEL::OnError, this, m_browser->GetId() );
+        
+        if( m_loadedEventBound )
+        {
+            Unbind( wxEVT_WEBVIEW_LOADED, &WEBVIEW_PANEL::OnWebViewLoaded, this, m_browser->GetId() );
+        }
+        
+        // Clear message handlers to prevent any pending callbacks
+        ClearMessageHandlers();
+    }
 }
 
 void WEBVIEW_PANEL::BindLoadedEvent()
@@ -141,6 +159,10 @@ void WEBVIEW_PANEL::ClearMessageHandlers()
 
 void WEBVIEW_PANEL::OnNavigationRequest( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser is still valid
+    if( !m_browser )
+        return;
+        
     m_loadError = false;
     wxLogTrace( "webview", "Navigation request to URL: %s", aEvt.GetURL() );
     // Default behavior: open external links in the system browser
@@ -156,10 +178,18 @@ void WEBVIEW_PANEL::OnNavigationRequest( wxWebViewEvent& aEvt )
 
 void WEBVIEW_PANEL::OnWebViewLoaded( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser is still valid
+    if( !m_browser )
+        return;
+        
     if( !m_initialized )
     {
         // Defer handler registration to avoid running during modal dialog/yield
         auto initFunc = [this]() {
+            // Double-check browser is still valid after async callback
+            if( !m_browser )
+                return;
+                
             for( const auto& handler : m_msgHandlers )
             {
                 if( !m_browser->AddScriptMessageHandler( handler.first ) )
@@ -209,6 +239,10 @@ void WEBVIEW_PANEL::OnWebViewLoaded( wxWebViewEvent& aEvt )
 
 void WEBVIEW_PANEL::OnNewWindow( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser is still valid
+    if( !m_browser )
+        return;
+        
     m_browser->LoadURL( aEvt.GetURL() );
     aEvt.Veto(); // Prevent default behavior of opening a new window
     wxLogTrace( "webview", "New window requested for URL: %s", aEvt.GetURL() );
@@ -219,6 +253,10 @@ void WEBVIEW_PANEL::OnNewWindow( wxWebViewEvent& aEvt )
 
 void WEBVIEW_PANEL::OnScriptMessage( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser is still valid
+    if( !m_browser )
+        return;
+        
     wxLogTrace( "webview", "Script message received: %s for handler %s", aEvt.GetString(), aEvt.GetMessageHandler() );
     wxString handler = aEvt.GetMessageHandler();
     handler.Trim(true).Trim(false);
@@ -249,12 +287,22 @@ void WEBVIEW_PANEL::OnScriptMessage( wxWebViewEvent& aEvt )
 
 void WEBVIEW_PANEL::OnScriptResult( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser and this object are still valid
+    // This can happen if WebKit calls back during shutdown after the WebView
+    // has been partially destroyed
+    if( !m_browser )
+        return;
+        
     if( aEvt.IsError() )
         wxLogDebug( "Async script execution failed: %s", aEvt.GetString() );
 }
 
 void WEBVIEW_PANEL::OnError( wxWebViewEvent& aEvt )
 {
+    // Safety check: ensure the browser is still valid
+    if( !m_browser )
+        return;
+        
     m_loadError = true;
     wxLogDebug( "WebView error: %s (url=%s)", aEvt.GetString(), aEvt.GetURL() );
 

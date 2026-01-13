@@ -3341,48 +3341,48 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
 
             static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->BindLoadedEvent();
             
-            // Dev override: load the agent panel from a live dev server (hot reload)
-            // instead of the static exported bundle under eeschema/widgets/agent_panel/out/.
-            //
-            // Example:
-            //   set KICAD_AGENT_PANEL_DEV_URL=http://localhost:3000
-            //   (then run `npm run dev` in eeschema/widgets/agent_panel)
-            wxString devUrl;
-            bool useDevServer = false;
+            // Load the website chat interface from the Next.js server
+            // The website is at PRIVATE/copper_ai/website and runs on port 3000 by default
+            // Set KICAD_WEBSITE_URL to override (e.g., http://localhost:3000 or https://your-domain.com)
+            wxString websiteUrl;
+            bool useWebsite = false;
 
-            if( wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV_URL" ), &devUrl ) && !devUrl.IsEmpty() )
+            // Check for explicit website URL
+            if( wxGetEnv( wxS( "KICAD_WEBSITE_URL" ), &websiteUrl ) && !websiteUrl.IsEmpty() )
             {
-                useDevServer = true;
+                useWebsite = true;
+                // Ensure it ends with /chat
+                if( !websiteUrl.EndsWith( wxS( "/chat" ) ) && !websiteUrl.EndsWith( wxS( "/chat/" ) ) )
+                {
+                    if( !websiteUrl.EndsWith( wxS( "/" ) ) )
+                        websiteUrl += wxS( "/" );
+                    websiteUrl += wxS( "chat" );
+                }
             }
             else
             {
-                wxString devFlag;
-
-                if( wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV" ), &devFlag ) && !devFlag.IsEmpty()
-                    && !devFlag.IsSameAs( wxS( "0" ) ) && !devFlag.IsSameAs( wxS( "false" ), false ) )
-                {
-                    devUrl = wxS( "http://localhost:3000" );
-                    useDevServer = true;
-                }
+                // Default to localhost:3000/chat (Next.js default port)
+                websiteUrl = wxS( "http://localhost:3000/chat" );
+                useWebsite = true;
             }
 
-            if( useDevServer )
+            if( useWebsite )
             {
-                wxLogTrace( wxS( "webview" ), "Agent panel: using dev URL: %s", devUrl );
+                wxLogTrace( wxS( "webview" ), "Agent panel: loading website chat: %s", websiteUrl );
 
-                // Dev-only: show a quick splash so it's obvious we're trying the dev server.
+                // Show a quick splash while loading
                 wxString splash = wxString::Format(
                         wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
                              "<body style='background:#0A0A0A;color:#E5E5E5;font-family:system-ui;padding:16px;'>"
-                             "<h2 style='margin:0 0 8px 0;'>Agent Panel (dev)</h2>"
+                             "<h2 style='margin:0 0 8px 0;'>Copper AI Chat</h2>"
                              "<div>Loading: <code>%s</code></div>"
                              "</body></html>" ),
-                        devUrl );
+                        websiteUrl );
                 static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( splash );
 
-                // Allow http(s) navigation inside the panel while in dev mode.
+                // Allow http(s) navigation inside the panel
                 static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetHandleExternalLinks( true );
-                static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->LoadURL( devUrl );
+                static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->LoadURL( websiteUrl );
             }
             else
             {
@@ -3467,43 +3467,64 @@ void SCH_EDIT_FRAME::ToggleOllamaAgent()
                 }
                 else
                 {
-                    // If HTML file not found, show a helpful message
-                    wxString exePath = wxStandardPaths::Get().GetExecutablePath();
+                    // If HTML file not found, try loading from website instead
+                    wxString fallbackWebsiteUrl;
+                    bool useFallbackWebsite = false;
 
-                    wxString envDevUrl;
-                    const bool hasEnvDevUrl = wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV_URL" ), &envDevUrl )
-                                              && !envDevUrl.IsEmpty();
-
-                    wxString envDevFlag;
-                    const bool hasEnvDevFlag = wxGetEnv( wxS( "KICAD_AGENT_PANEL_DEV" ), &envDevFlag )
-                                               && !envDevFlag.IsEmpty();
-
-                    auto escape = []( wxString s )
+                    // Check for explicit website URL
+                    if( wxGetEnv( wxS( "KICAD_WEBSITE_URL" ), &fallbackWebsiteUrl ) && !fallbackWebsiteUrl.IsEmpty() )
                     {
-                        s.Replace( "&", "&amp;" );
-                        s.Replace( "<", "&lt;" );
-                        s.Replace( ">", "&gt;" );
-                        return s;
-                    };
+                        useFallbackWebsite = true;
+                        // Ensure it ends with /chat
+                        if( !fallbackWebsiteUrl.EndsWith( wxS( "/chat" ) ) && !fallbackWebsiteUrl.EndsWith( wxS( "/chat/" ) ) )
+                        {
+                            if( !fallbackWebsiteUrl.EndsWith( wxS( "/" ) ) )
+                                fallbackWebsiteUrl += wxS( "/" );
+                            fallbackWebsiteUrl += wxS( "chat" );
+                        }
+                    }
+                    else
+                    {
+                        // Default to localhost:3000/chat
+                        fallbackWebsiteUrl = wxS( "http://localhost:3000/chat" );
+                        useFallbackWebsite = true;
+                    }
 
-                    const wxString notSet = wxString( wxS( "(not set)" ) );
-                    const wxString devUrlDisplay = hasEnvDevUrl ? escape( envDevUrl ) : notSet;
-                    const wxString devFlagDisplay = hasEnvDevFlag ? escape( envDevFlag ) : notSet;
+                    if( useFallbackWebsite )
+                    {
+                        wxLogTrace( wxS( "webview" ), "Agent panel: HTML not found, loading website chat: %s", fallbackWebsiteUrl );
+                        static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetHandleExternalLinks( true );
+                        static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->LoadURL( fallbackWebsiteUrl );
+                    }
+                    else
+                    {
+                        // Fallback: show error message
+                        wxString exePath = wxStandardPaths::Get().GetExecutablePath();
 
-                    wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Agent Panel</h1><p>Build the agent panel first:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd eeschema/widgets/agent_panel<br>npm run build</pre><p>Tried path: " ) 
-                                  + htmlPath.GetFullPath() 
-                              + wxS( "</p>" )
-                              + wxS( "<hr style='border:0;border-top:1px solid #22272F;margin:16px 0;'/>" )
-                              + wxS( "<h3 style='margin:0 0 8px 0;font-size:14px;'>Debug</h3>" )
-                              + wxS( "<div style='font-size:12px;line-height:1.5;'>" )
-                              + wxS( "<div><strong>Executable:</strong> <code>" ) + escape( exePath ) + wxS( "</code></div>" )
-                              + wxS( "<div><strong>CWD:</strong> <code>" ) + escape( wxGetCwd() ) + wxS( "</code></div>" )
-                              + wxS( "<div><strong>KICAD_AGENT_PANEL_DEV_URL:</strong> <code>" )
-                              + devUrlDisplay + wxS( "</code></div>" )
-                              + wxS( "<div><strong>KICAD_AGENT_PANEL_DEV:</strong> <code>" )
-                              + devFlagDisplay + wxS( "</code></div>" )
-                              + wxS( "</div></body></html>" );
-                    static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( html );
+                        auto escape = []( wxString s )
+                        {
+                            s.Replace( "&", "&amp;" );
+                            s.Replace( "<", "&lt;" );
+                            s.Replace( ">", "&gt;" );
+                            return s;
+                        };
+
+                        wxString envWebsiteUrl;
+                        const bool hasEnvWebsiteUrl = wxGetEnv( wxS( "KICAD_WEBSITE_URL" ), &envWebsiteUrl )
+                                                      && !envWebsiteUrl.IsEmpty();
+
+                        wxString html = wxS( "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body style='background: #0A0A0A; color: #E5E5E5; font-family: system-ui; padding: 20px;'><h1>Copper AI Chat</h1><p>Unable to load chat interface. Please ensure the website is running:</p><pre style='background: #1A1A1A; padding: 10px; border-radius: 4px;'>cd PRIVATE/copper_ai/website<br>npm run dev</pre><p>Or set KICAD_WEBSITE_URL environment variable to point to your website URL.</p>" );
+                        html += wxS( "<hr style='border:0;border-top:1px solid #22272F;margin:16px 0;'/>" );
+                        html += wxS( "<h3 style='margin:0 0 8px 0;font-size:14px;'>Debug</h3>" );
+                        html += wxS( "<div style='font-size:12px;line-height:1.5;'>" );
+                        html += wxS( "<div><strong>Executable:</strong> <code>" ) + escape( exePath ) + wxS( "</code></div>" );
+                        html += wxS( "<div><strong>CWD:</strong> <code>" ) + escape( wxGetCwd() ) + wxS( "</code></div>" );
+                        html += wxS( "<div><strong>KICAD_WEBSITE_URL:</strong> <code>" );
+                        html += ( hasEnvWebsiteUrl ? escape( envWebsiteUrl ) : wxS( "(not set)" ) );
+                        html += wxS( "</code></div>" );
+                        html += wxS( "</div></body></html>" );
+                        static_cast<WEBVIEW_PANEL*>( m_ollamaAgentPane )->SetPage( html );
+                    }
                 }
             }
             

@@ -34,6 +34,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <cmath>  // Must be included before <complex> for constexpr math functions on macOS
 #include <complex>
 #include <memory>
 

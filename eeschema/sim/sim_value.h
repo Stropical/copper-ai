@@ -27,6 +27,11 @@
 
 #include <wx/string.h>
 #include <optional>
+// Workaround for macOS SDK <complex> header requiring internal constexpr functions
+// The issue is that libc++'s <complex> header expects internal __constexpr_* functions
+// that may not be available in certain Xcode/SDK combinations. Including <cmath> first
+// helps ensure the necessary math functions are available.
+#include <cmath>
 #include <complex>
 #include <memory>
 #include <pegtl.hpp>

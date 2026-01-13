@@ -19,6 +19,7 @@
 
 #include "sch_ollama_agent_tool.h"
 #include "sch_ollama_agent_dialog.h"
+#include "sch_tool_http_server.h"
 #include <sch_edit_frame.h>
 #include <dialogs/dialog_text_entry.h>
 #include <confirm.h>
@@ -57,6 +58,20 @@ SCH_OLLAMA_AGENT_TOOL::SCH_OLLAMA_AGENT_TOOL() :
 }
 
 
+SCH_OLLAMA_AGENT_TOOL::~SCH_OLLAMA_AGENT_TOOL()
+{
+    // Stop HTTP server before destruction
+    if( m_httpServer )
+    {
+        // Clear tool pointer first to prevent access to partially destroyed object
+        m_httpServer->ClearTool();
+        // Then stop the server (which will wait for thread to finish)
+        m_httpServer->StopServer();
+        m_httpServer.reset();
+    }
+}
+
+
 bool SCH_OLLAMA_AGENT_TOOL::Init()
 {
     if( !SCH_TOOL_BASE<SCH_EDIT_FRAME>::Init() )
@@ -65,6 +80,26 @@ bool SCH_OLLAMA_AGENT_TOOL::Init()
     // Initialize agent - ollama client will be created lazily when needed
     // to avoid potential exceptions during tool initialization
     m_agent = std::make_unique<SCH_AGENT>( m_frame );
+
+    // Start HTTP server for tool API
+    // Get port from environment variable or use default 54321
+    int port = 54321;
+    wxString portEnv;
+    if( wxGetEnv( wxT( "KICAD_HTTP_TOOL_PORT" ), &portEnv ) && !portEnv.IsEmpty() )
+    {
+        long portLong;
+        if( portEnv.ToLong( &portLong ) && portLong > 0 && portLong < 65536 )
+        {
+            port = (int)portLong;
+        }
+    }
+
+    m_httpServer = std::make_unique<SCH_TOOL_HTTP_SERVER>( this, port );
+    if( !m_httpServer->StartServer() )
+    {
+        wxLogWarning( wxT( "[OllamaAgent] Failed to start HTTP tool server on port %d" ), port );
+        m_httpServer.reset();
+    }
 
     return true;
 }
@@ -1046,6 +1081,21 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
         return out;
     };
 
+    // Split query into words for better matching
+    auto splitWords = []( const wxString& text ) -> std::vector<wxString>
+    {
+        std::vector<wxString> words;
+        wxStringTokenizer tokenizer( text.Lower(), wxS( " \t\n\r,;:-_./" ), wxTOKEN_STRTOK );
+        while( tokenizer.HasMoreTokens() )
+        {
+            wxString word = tokenizer.GetNextToken();
+            word.Trim( true ).Trim( false );
+            if( !word.IsEmpty() && word.length() >= 2 ) // Ignore single characters
+                words.push_back( word );
+        }
+        return words;
+    };
+
     wxString qLower = query.Lower();
     wxString qAfterColon;
     if( query.Contains( wxS( ":" ) ) )
@@ -1056,6 +1106,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
     if( !qAfterColon.IsEmpty() )
         qAfterNorm = normalize( qAfterColon );
 
+    std::vector<wxString> queryWords = splitWords( qLower );
+
     struct MATCH
     {
         int score = 0;
@@ -1065,8 +1117,20 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
 
     std::vector<MATCH> matches;
 
-    // Enumerate libraries and symbol names (can be expensive; keep limit small).
+    // Ensure libraries are loaded before enumeration (some environments skip auto-load).
+    adapter->AsyncLoad();
+    adapter->BlockUntilLoaded();
+
+    // Enumerate libraries and symbols (now loading full symbols to check descriptions/keywords).
     std::vector<wxString> libs = adapter->GetLibraryNames();
+
+    if( libs.empty() )
+    {
+        m_lastToolError = _( "search_symbol: no symbol libraries are loaded. "
+                             "Configure project/global symbol library tables or install the KiCad symbol libraries." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
     for( const wxString& lib : libs )
     {
         // Load if needed so enumeration works.
@@ -1078,39 +1142,90 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
             wxString nLower = name.Lower();
             wxString nNorm = normalize( name );
 
-            auto scoreAgainst = [&]( const wxString& q, const wxString& qn ) -> int
+            // Load symbol to get description and keywords
+            wxString descLower;
+            wxString keywordsLower;
+            try
             {
-                if( q.IsEmpty() && qn.IsEmpty() )
+                LIB_SYMBOL* symbol = adapter->LoadSymbol( lib, name );
+                if( symbol )
+                {
+                    descLower = symbol->GetDescription().Lower();
+                    keywordsLower = symbol->GetKeyWords().Lower();
+                }
+            }
+            catch( ... )
+            {
+                // Symbol load failed, continue with name-only search
+            }
+
+            auto scoreText = [&]( const wxString& text, int baseScore ) -> int
+            {
+                if( text.IsEmpty() )
                     return 0;
 
+                wxString tLower = text.Lower();
+                wxString tNorm = normalize( text );
                 int s = 0;
 
-                if( !q.IsEmpty() )
-                {
-                    if( nLower == q )
-                        s = std::max( s, 1000 );
-                    else if( nLower.StartsWith( q ) )
-                        s = std::max( s, 900 );
-                    else if( nLower.Find( q ) != wxNOT_FOUND )
-                        s = std::max( s, 700 );
-                }
+                // Exact match
+                if( tLower == qLower )
+                    s = std::max( s, baseScore + 200 );
+                else if( tNorm == qNorm )
+                    s = std::max( s, baseScore + 180 );
 
-                if( !qn.IsEmpty() )
+                // Starts with
+                if( tLower.StartsWith( qLower ) )
+                    s = std::max( s, baseScore + 100 );
+                else if( tNorm.StartsWith( qNorm ) )
+                    s = std::max( s, baseScore + 80 );
+
+                // Contains
+                if( tLower.Find( qLower ) != wxNOT_FOUND )
+                    s = std::max( s, baseScore + 50 );
+                else if( tNorm.Find( qNorm ) != wxNOT_FOUND )
+                    s = std::max( s, baseScore + 30 );
+
+                // Word-based matching (for multi-word queries like "resistor 0805")
+                if( !queryWords.empty() )
                 {
-                    if( nNorm == qn )
-                        s = std::max( s, 980 );
-                    else if( nNorm.StartsWith( qn ) )
-                        s = std::max( s, 880 );
-                    else if( nNorm.Find( qn ) != wxNOT_FOUND )
-                        s = std::max( s, 680 );
+                    int wordMatches = 0;
+                    for( const wxString& word : queryWords )
+                    {
+                        if( word.length() < 2 )
+                            continue;
+                        if( tLower.Find( word ) != wxNOT_FOUND || normalize( tLower ).Find( normalize( word ) ) != wxNOT_FOUND )
+                            wordMatches++;
+                    }
+                    if( wordMatches > 0 )
+                    {
+                        // Score based on how many words matched
+                        int wordScore = ( wordMatches * baseScore ) / queryWords.size();
+                        s = std::max( s, wordScore );
+                    }
                 }
 
                 return s;
             };
 
             int score = 0;
-            score = std::max( score, scoreAgainst( qLower, qNorm ) );
-            score = std::max( score, scoreAgainst( qAfterColon.Lower(), qAfterNorm ) );
+
+            // Score name matches (highest priority)
+            score = std::max( score, scoreText( name, 1000 ) );
+
+            // Score description matches (medium priority)
+            if( !descLower.IsEmpty() )
+                score = std::max( score, scoreText( descLower, 500 ) );
+
+            // Score keyword matches (medium priority)
+            if( !keywordsLower.IsEmpty() )
+                score = std::max( score, scoreText( keywordsLower, 500 ) );
+
+            // Handle library:name format queries
+            if( !qAfterColon.IsEmpty() )
+            {
+                score = std::max( score, scoreText( qAfterColon, 1000 ) );
+            }
 
             if( score > 0 )
                 matches.push_back( MATCH{ score, lib, name } );
@@ -1461,35 +1576,43 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
         newSymbol->SetPosition( chosenPos );
     }
 
-    SCH_COMMIT commit( m_frame );
-    // Ensure the symbol is permanently added to the screen and view.
-    m_frame->AddToScreen( newSymbol, screen );
-    commit.Added( newSymbol, screen );
-    commit.Push( _( "Place component" ) );
+    // Store reference before deferring UI operations
+    wxString ref = newSymbol->GetRef( &sheet, false );
     
-    // Ensure the canvas refreshes so the new component is visible immediately.
-    if( m_frame->GetCanvas() )
-    {
-        if( auto view = m_frame->GetCanvas()->GetView() )
-        {
-            view->Update( newSymbol );
-        }
+    // Defer all UI operations to the main thread (required on macOS)
+    m_frame->CallAfter( [this, newSymbol, screen, ref, symbolId]()
+                        {
+                            SCH_COMMIT commit( m_frame );
+                            // Ensure the symbol is permanently added to the screen and view.
+                            m_frame->AddToScreen( newSymbol, screen );
+                            commit.Added( newSymbol, screen );
+                            commit.Push( _( "Place component" ) );
+                            
+                            // Ensure the canvas refreshes so the new component is visible immediately.
+                            if( m_frame->GetCanvas() )
+                            {
+                                if( auto view = m_frame->GetCanvas()->GetView() )
+                                {
+                                    view->Update( newSymbol );
+                                }
 
-        m_frame->GetCanvas()->Refresh();
-    }
+                                m_frame->GetCanvas()->Refresh();
+                            }
 
-    m_frame->OnModify();
+                            m_frame->OnModify();
+
+                            if( m_frame->GetToolManager() )
+                            {
+                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
+                            }
+                        } );
     
     // Return the assigned reference so the agent can use it for labels/wiring.
+    // Note: UI operations are deferred, but the symbol is already added to the screen above
     json res = json::object();
-    res["reference"] = newSymbol->GetRef( &sheet, false ).ToStdString();
+    res["reference"] = ref.ToStdString();
     res["symbol"] = symbolId.ToStdString();
     m_lastToolResult = wxString::FromUTF8( res.dump( 2 ) );
-
-    if( m_frame->GetToolManager() )
-    {
-        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
-    }
 
     return true;
 }
@@ -1625,21 +1748,27 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
     VECTOR2I currentPos = symbol->GetPosition();
     VECTOR2I delta = newPos - currentPos;
 
-    // Move the symbol
+    // Move the symbol - defer entire operation to main thread for proper undo/redo
     SCH_SCREEN* screen = symbolSheet.LastScreen();
     if( !screen )
         return false;
 
-    SCH_COMMIT commit( m_frame );
-    commit.Modify( symbol, screen );
-    symbol->Move( delta );
+    wxString commitMsg = wxString::Format( _( "Move component %s" ), reference );
+    m_frame->CallAfter( [this, symbol, screen, delta, commitMsg]()
+                        {
+                            SCH_COMMIT commit( m_frame );
+                            // Record old state before modification
+                            commit.Modify( symbol, screen );
+                            // Do the move
+                            symbol->Move( delta );
+                            // Push the commit (triggers UI refresh)
+                            commit.Push( commitMsg );
 
-    commit.Push( wxString::Format( _( "Move component %s" ), reference ) );
-
-    if( m_frame->GetToolManager() )
-    {
-        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, symbol );
-    }
+                            if( m_frame->GetToolManager() )
+                            {
+                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, symbol );
+                            }
+                        } );
 
     return true;
 }
@@ -1848,29 +1977,39 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         commit.Added( stub, targetScreen );
     }
 
+    // Add to screen synchronously (data operation)
     m_frame->AddToScreen( label, targetScreen );
-    commit.Added( label, targetScreen );
-    commit.Push( isLocal ? _( "Add net label" ) : _( "Add global label" ) );
+    
+    // Defer UI operations to the main thread (required on macOS)
+    wxString commitMsg = isLocal ? _( "Add net label" ) : _( "Add global label" );
+    m_frame->CallAfter( [this, label, stub, targetScreen, commitMsg]()
+                        {
+                            SCH_COMMIT commit( m_frame );
+                            if( stub )
+                                commit.Added( stub, targetScreen );
+                            commit.Added( label, targetScreen );
+                            commit.Push( commitMsg );
 
-    if( m_frame->GetCanvas() )
-    {
-        if( auto view = m_frame->GetCanvas()->GetView() )
-        {
-            if( stub ) view->Update( stub );
-            view->Update( label );
-        }
+                            if( m_frame->GetCanvas() )
+                            {
+                                if( auto view = m_frame->GetCanvas()->GetView() )
+                                {
+                                    if( stub ) view->Update( stub );
+                                    view->Update( label );
+                                }
 
-        m_frame->GetCanvas()->Refresh();
-    }
+                                m_frame->GetCanvas()->Refresh();
+                            }
 
-    m_frame->OnModify();
+                            m_frame->OnModify();
 
-    if( m_frame->GetToolManager() )
-    {
-        if( stub )
-            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
-        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
-    }
+                            if( m_frame->GetToolManager() )
+                            {
+                                if( stub )
+                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
+                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
+                            }
+                        } );
 
     return true;
 }
@@ -2173,35 +2312,37 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         l2->SetText( netName );
         l2->SetParent( targetScreen );
 
-        SCH_COMMIT commit( m_frame );
-        // Ensure items are actually on the screen/view (commit only records undo/redo).
+        // Add to screen synchronously (data operation)
         m_frame->AddToScreen( l1, targetScreen );
         m_frame->AddToScreen( l2, targetScreen );
-        commit.Added( l1, targetScreen );
-        commit.Added( l2, targetScreen );
-        commit.Push( _( "Add net labels" ) );
+        
+        // Defer UI operations to the main thread
+        m_frame->CallAfter( [this, l1, l2, targetScreen]()
+                            {
+                                SCH_COMMIT commit( m_frame );
+                                commit.Added( l1, targetScreen );
+                                commit.Added( l2, targetScreen );
+                                commit.Push( _( "Add net labels" ) );
 
-        if( m_frame->GetCanvas() )
-        {
-            if( auto view = m_frame->GetCanvas()->GetView() )
-            {
-                view->Update( l1 );
-                view->Update( l2 );
-            }
+                                if( m_frame->GetCanvas() )
+                                {
+                                    if( auto view = m_frame->GetCanvas()->GetView() )
+                                    {
+                                        view->Update( l1 );
+                                        view->Update( l2 );
+                                    }
 
-            m_frame->GetCanvas()->Refresh();
-        }
+                                    m_frame->GetCanvas()->Refresh();
+                                }
 
-        m_frame->OnModify();
+                                m_frame->OnModify();
 
-        if( m_frame->GetToolManager() )
-        {
-            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
-            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
-        }
-
-        if( m_frame->GetCanvas() )
-            m_frame->GetCanvas()->Refresh();
+                                if( m_frame->GetToolManager() )
+                                {
+                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
+                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
+                                }
+                            } );
 
         return true;
     }
@@ -2390,26 +2531,34 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         addSegmentIfNeeded( bend, endEsc );
     }
 
-    commit.Push( _( "Add wire" ) );
+    // Defer UI operations to the main thread (commit.Push triggers OnModify which touches OpenGL)
+    m_frame->CallAfter( [this, newWires, targetScreen]()
+                        {
+                            SCH_COMMIT pushCommit( m_frame );
+                            // Re-add all wires to the commit for undo/redo
+                            for( SCH_LINE* w : newWires )
+                                pushCommit.Added( w, targetScreen );
+                            pushCommit.Push( _( "Add wire" ) );
 
-    if( m_frame->GetCanvas() )
-    {
-        if( auto view = m_frame->GetCanvas()->GetView() )
-        {
-            for( SCH_LINE* w : newWires )
-                view->Update( w );
-        }
+                            if( m_frame->GetCanvas() )
+                            {
+                                if( auto view = m_frame->GetCanvas()->GetView() )
+                                {
+                                    for( SCH_LINE* w : newWires )
+                                        view->Update( w );
+                                }
 
-        m_frame->GetCanvas()->Refresh();
-    }
+                                m_frame->GetCanvas()->Refresh();
+                            }
 
-    m_frame->OnModify();
+                            m_frame->OnModify();
 
-    if( m_frame->GetToolManager() )
-    {
-        for( SCH_LINE* w : newWires )
-            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
-    }
+                            if( m_frame->GetToolManager() )
+                            {
+                                for( SCH_LINE* w : newWires )
+                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
+                            }
+                        } );
 
     return true;
 }
