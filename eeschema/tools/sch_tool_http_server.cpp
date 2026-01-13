@@ -42,16 +42,20 @@ SCH_TOOL_HTTP_SERVER::~SCH_TOOL_HTTP_SERVER()
     // Ensure server is stopped and thread is joined before destruction
     StopServer();
     
-    // Clear tool pointer to prevent any lingering access
-    wxMutexLocker lock( m_mutex );
-    m_tool = nullptr;
+    // Tool pointer is already cleared in StopServer(), no need to access mutex here
+    // as the thread is guaranteed to be stopped
 }
 
 
 bool SCH_TOOL_HTTP_SERVER::StartServer()
 {
-    if( m_running )
-        return true;
+    {
+        wxMutexLocker lock( m_mutex );
+        if( m_running )
+        {
+            return true;
+        }
+    }
 
     // Initialize wxSocket
     wxSocketBase::Initialize();
@@ -75,24 +79,33 @@ bool SCH_TOOL_HTTP_SERVER::StartServer()
     m_server->SetFlags( wxSOCKET_NOWAIT );
     m_server->SetTimeout( 1 ); // 1 second timeout for Accept()
 
-    m_running = true;
+    {
+        wxMutexLocker lock( m_mutex );
+        m_running = true;
+    }
 
     // Start the server thread
     if( Create() != wxTHREAD_NO_ERROR )
     {
         wxLogError( wxT( "[ToolServer] Failed to create server thread" ) );
-        delete m_server;
-        m_server = nullptr;
-        m_running = false;
+        {
+            wxMutexLocker lock( m_mutex );
+            delete m_server;
+            m_server = nullptr;
+            m_running = false;
+        }
         return false;
     }
 
     if( Run() != wxTHREAD_NO_ERROR )
     {
         wxLogError( wxT( "[ToolServer] Failed to start server thread" ) );
-        delete m_server;
-        m_server = nullptr;
-        m_running = false;
+        {
+            wxMutexLocker lock( m_mutex );
+            delete m_server;
+            m_server = nullptr;
+            m_running = false;
+        }
         return false;
     }
 
@@ -104,10 +117,14 @@ bool SCH_TOOL_HTTP_SERVER::StartServer()
 void SCH_TOOL_HTTP_SERVER::StopServer()
 {
     // Check if already stopped
+    bool wasRunning = false;
     {
         wxMutexLocker lock( m_mutex );
         if( !m_running )
+        {
             return;
+        }
+        wasRunning = true;
         m_running = false;
 
         // Close the server socket to stop accepting new connections
@@ -116,14 +133,23 @@ void SCH_TOOL_HTTP_SERVER::StopServer()
         {
             m_server->Close();
         }
+        
+        // Clear tool pointer to prevent access to potentially destroyed object
+        m_tool = nullptr;
     }
 
-    // Wait for thread to finish (blocking)
+    // Always wait for thread to finish if it was running (blocking)
     // Note: Wait() must be called outside the mutex to avoid deadlock
-    if( IsRunning() )
+    // We check wasRunning instead of IsRunning() because IsRunning() might
+    // return false even if the thread is still executing Entry()
+    if( wasRunning )
+    {
+        // Wait for thread to exit - this is critical to prevent accessing
+        // destroyed object members from the thread
         Wait();
+    }
 
-    // Now safe to delete the server socket
+    // Now safe to delete the server socket (thread is guaranteed to be stopped)
     {
         wxMutexLocker lock( m_mutex );
         if( m_server )
@@ -149,21 +175,23 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
     while( true )
     {
         // Check if we should stop (check frequently to allow quick shutdown)
-        {
-            wxMutexLocker lock( m_mutex );
-            if( !m_running )
-                break;
-            if( !m_server || !m_server->IsOk() )
-                break;
-        }
-        
+        // Use a local copy of m_running to avoid holding mutex for long
+        bool shouldRun = false;
         wxSocketServer* server = nullptr;
         {
             wxMutexLocker lock( m_mutex );
-            server = m_server;
+            shouldRun = m_running;
+            if( shouldRun )
+            {
+                server = m_server;
+                if( !server )
+                    shouldRun = false;
+                else if( !server->IsOk() )
+                    shouldRun = false;
+            }
         }
         
-        if( !server )
+        if( !shouldRun || !server )
             break;
         
         // Check for new connections (non-blocking)
@@ -187,16 +215,8 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
             // Use shorter sleep to allow faster shutdown response
             wxThread::Sleep( 50 );
         }
-        
-        // Check for shutdown request again after handling client
-        {
-            wxMutexLocker lock( m_mutex );
-            if( !m_running )
-                break;
-        }
     }
 
-    wxLogMessage( wxT( "[ToolServer] Server thread exiting" ) );
     return nullptr;
 }
 

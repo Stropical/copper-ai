@@ -72,6 +72,25 @@ SCH_OLLAMA_AGENT_TOOL::~SCH_OLLAMA_AGENT_TOOL()
 }
 
 
+void SCH_OLLAMA_AGENT_TOOL::Reset( RESET_REASON aReason )
+{
+    // Only stop HTTP server on tool shutdown, not on normal resets
+    // The server should persist across frame switches, model reloads, etc.
+    if( aReason == RESET_REASON::SHUTDOWN )
+    {
+        // Ensure the HTTP server is stopped when the tool/frame is shutting down
+        if( m_httpServer )
+        {
+            m_httpServer->ClearTool();
+            m_httpServer->StopServer();
+            m_httpServer.reset();
+        }
+    }
+
+    SCH_TOOL_BASE<SCH_EDIT_FRAME>::Reset( aReason );
+}
+
+
 bool SCH_OLLAMA_AGENT_TOOL::Init()
 {
     if( !SCH_TOOL_BASE<SCH_EDIT_FRAME>::Init() )

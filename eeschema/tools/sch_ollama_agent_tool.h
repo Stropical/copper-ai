@@ -55,7 +55,7 @@ public:
     /// @copydoc TOOL_INTERACTIVE::Init()
     bool Init() override;
 
-    void Reset( RESET_REASON aReason ) override {}
+    void Reset( RESET_REASON aReason ) override;
 
     /**
      * Process a natural language request and execute schematic operations
