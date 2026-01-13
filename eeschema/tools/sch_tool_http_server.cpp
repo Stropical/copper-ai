@@ -22,6 +22,7 @@
 #include <wx/socket.h>
 #include <wx/log.h>
 #include <wx/string.h>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
@@ -197,17 +198,15 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
         // Check for new connections (non-blocking)
         // Note: server might be closed between the check above and here,
         // but Accept() will handle that gracefully
-        wxSocketBase* client = nullptr;
-        client = server->Accept( false );
+        std::unique_ptr<wxSocketBase> client( server->Accept( false ) );
 
-        if( client )
+        if( client && client->IsOk() )
         {
             // Handle client in a way that doesn't block the server thread
             // Set socket to non-blocking to avoid hanging
             client->SetFlags( wxSOCKET_NOWAIT );
             client->SetTimeout( 2 );
-            HandleClient( client );
-            client->Destroy();
+            HandleClient( client.get() );
         }
         else
         {
@@ -223,15 +222,26 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
 
 void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
 {
+    if( !aSocket || !aSocket->IsOk() )
+        return;
+    
     // Check if we're shutting down before handling client
     {
         wxMutexLocker lock( m_mutex );
         if( !m_running )
             return;
     }
-    
-    if( !aSocket || !aSocket->IsOk() )
-        return;
+
+    struct SOCKET_SCOPE_CLOSER
+    {
+        wxSocketBase* socket;
+
+        ~SOCKET_SCOPE_CLOSER()
+        {
+            if( socket )
+                socket->Close();
+        }
+    } socketCloser{ aSocket };
 
     // Read request
     char buffer[8192];
@@ -247,7 +257,7 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     // Then read body if Content-Length is specified
     bool headersComplete = false;
     long contentLength = 0;
-    size_t headerEndPos = 0;
+    int headerEndPos = wxNOT_FOUND;
     
     // First, read until we get headers (ends with \r\n\r\n)
     int readAttempts = 0;
@@ -305,13 +315,13 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
             
             // Parse Content-Length header
             wxString headers = currentRequest.Left( headerEndPos );
-            size_t contentLengthPos = headers.Lower().Find( wxT( "content-length:" ) );
+            int contentLengthPos = headers.Lower().Find( wxT( "content-length:" ) );
             if( contentLengthPos != wxNOT_FOUND )
             {
-                size_t colonPos = contentLengthPos + 15; // length of "content-length:"
+                size_t colonPos = static_cast<size_t>( contentLengthPos + 15 ); // length of "content-length:"
                 wxString lengthStr = headers.Mid( colonPos );
                 lengthStr.Trim( false ).Trim( true ); // trim whitespace
-                size_t crlfPos = lengthStr.Find( wxT( "\r\n" ) );
+                int crlfPos = lengthStr.Find( wxT( "\r\n" ) );
                 if( crlfPos != wxNOT_FOUND )
                     lengthStr = lengthStr.Left( crlfPos );
                 lengthStr.ToLong( &contentLength );
@@ -323,7 +333,7 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     // If we have headers, read body if Content-Length is specified
     if( headersComplete && contentLength > 0 )
     {
-        size_t bodyStart = headerEndPos + 4; // Skip "\r\n\r\n"
+        size_t bodyStart = static_cast<size_t>( headerEndPos ) + 4; // Skip "\r\n\r\n"
         size_t bodyRead = totalRead - bodyStart;
         int bodyReadAttempts = 0;
         const int maxBodyReadAttempts = 50; // Max ~2.5 seconds for body
@@ -461,7 +471,7 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
                                          wxString& aPath, wxString& aBody )
 {
     // Parse HTTP request line: "METHOD /path HTTP/1.1"
-    size_t firstLineEnd = aRequest.Find( wxT( "\r\n" ) );
+    int firstLineEnd = aRequest.Find( wxT( "\r\n" ) );
     if( firstLineEnd == wxNOT_FOUND )
     {
         // Try with just \n as fallback
@@ -481,7 +491,7 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
     aPath = parts[1];
 
     // Find body (after double CRLF)
-    size_t bodyStart = aRequest.Find( wxT( "\r\n\r\n" ) );
+    int bodyStart = aRequest.Find( wxT( "\r\n\r\n" ) );
     if( bodyStart == wxNOT_FOUND )
     {
         // Try with \n\n as fallback
@@ -496,9 +506,9 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
         bodyStart += 4; // Skip "\r\n\r\n"
     }
     
-    if( bodyStart != wxNOT_FOUND && bodyStart < aRequest.length() )
+    if( bodyStart != wxNOT_FOUND && static_cast<size_t>( bodyStart ) < aRequest.length() )
     {
-        aBody = aRequest.Mid( bodyStart );
+        aBody = aRequest.Mid( static_cast<size_t>( bodyStart ) );
         aBody.Trim( false ).Trim( true ); // Trim whitespace
     }
     else

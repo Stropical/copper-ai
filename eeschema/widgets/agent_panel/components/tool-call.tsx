@@ -11,6 +11,9 @@ export interface ToolCall {
   arguments: string | Record<string, any>
   status: "pending" | "running" | "accepted" | "rejected"
   result?: string | Record<string, any>
+  sourceLine?: number
+  order?: number
+  inline?: boolean
   displayMode?: "card" | "text" // Whether to show as card or simple text
 }
 
@@ -121,4 +124,3 @@ export function ToolCallComponent({ toolCall, onAccept, onUndo }: ToolCallProps)
     </div>
   )
 }
-

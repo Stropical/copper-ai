@@ -1104,8 +1104,10 @@ export function ChatWindow() {
   // - Lines inside ```tool fenced blocks like: "schematic.add_wire { ...json... }"
   const parseToolCalls = (text: string): ToolCall[] => {
     const toolCalls: ToolCall[] = []
+    const lines = text.split("\n")
+    let inToolFence = false
 
-    const parseToolLine = (line: string) => {
+    const parseToolLine = (line: string, lineIndex: number) => {
       const trimmed = line.trim()
       if (!trimmed) return
 
@@ -1125,6 +1127,8 @@ export function ChatWindow() {
             name: toolName,
             arguments: args,
             status: "pending",
+            sourceLine: lineIndex,
+            order: toolCalls.length,
           })
         } catch {
           console.warn("Failed to parse tool call JSON:", jsonStr)
@@ -1147,16 +1151,16 @@ export function ChatWindow() {
           name: toolName,
           arguments: args,
           status: "pending",
+          sourceLine: lineIndex,
+          order: toolCalls.length,
         })
       } catch {
         console.warn("Failed to parse tool call JSON:", jsonStr)
       }
     }
 
-    const lines = text.split("\n")
-    let inToolFence = false
-
-    for (const line of lines) {
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx]
       const trimmed = line.trim()
 
       if (trimmed.startsWith("```")) {
@@ -1173,26 +1177,39 @@ export function ChatWindow() {
       }
 
       if (inToolFence) {
-        parseToolLine(line)
+        parseToolLine(line, idx)
         continue
       }
 
-      parseToolLine(line)
+      parseToolLine(line, idx)
     }
 
     return toolCalls
   }
 
   // Remove tool calls, plan sections, and JSON plan objects from text to get clean content
-  const removeToolCalls = (text: string): string => {
+  const removeToolCalls = (text: string, options?: { toolCalls?: ToolCall[] }): string => {
     const lines = text.split("\n")
     const kept: string[] = []
     let inToolFence = false
     let inPlanSection = false
     let inJsonBlock = false
-    let jsonDepth = 0
+    const toolLineRegex = /^([a-zA-Z0-9_.:-]+)\s+\{[\s\S]*\}$/
+    const toolCallLineMap = new Map<number, ToolCall[]>()
 
-    for (const line of lines) {
+    if (options?.toolCalls) {
+      for (const toolCall of options.toolCalls) {
+        if (typeof toolCall.sourceLine === "number") {
+          if (!toolCallLineMap.has(toolCall.sourceLine)) {
+            toolCallLineMap.set(toolCall.sourceLine, [])
+          }
+          toolCallLineMap.get(toolCall.sourceLine)!.push(toolCall)
+        }
+      }
+    }
+
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx]
       const trimmed = line.trim()
 
       // Handle code fences
@@ -1215,13 +1232,40 @@ export function ChatWindow() {
         }
       }
 
-      if (inToolFence || inJsonBlock) {
+      if (inToolFence) {
+        const replacements = toolCallLineMap.get(idx)
+        if (replacements?.length) {
+          for (const tc of replacements) {
+            tc.inline = true
+            kept.push(`<tool-call data-tool-id="${tc.id}"></tool-call>`)
+          }
+        }
         continue
       }
 
-      // Drop standalone tool lines
-      if (trimmed.startsWith("TOOL ")) continue
-      if (/^([a-zA-Z0-9_.:-]+)\s+\{[\s\S]*\}$/.test(trimmed)) continue
+      if (inJsonBlock) {
+        continue
+      }
+
+      const replaceToolLine = () => {
+        const replacements = toolCallLineMap.get(idx)
+        if (replacements?.length) {
+          for (const tc of replacements) {
+            tc.inline = true
+            kept.push(`<tool-call data-tool-id="${tc.id}"></tool-call>`)
+          }
+        }
+      }
+
+      // Drop standalone tool lines, optionally replacing with placeholders
+      if (trimmed.startsWith("TOOL ")) {
+        replaceToolLine()
+        continue
+      }
+      if (toolLineRegex.test(trimmed)) {
+        replaceToolLine()
+        continue
+      }
       
       // Drop "Plan:" headers and plan sections
       if (trimmed.match(/^Plan:\s*$/i)) {
@@ -1737,13 +1781,22 @@ export function ChatWindow() {
 
               if (toolCalls.length > 0) {
                 console.info("Tool calls detected:", toolCalls)
-                const toolCallsToShow = SERIAL_TOOL_MODE ? toolCalls.slice(0, 1) : toolCalls
+                const toolCallsToShowBase = SERIAL_TOOL_MODE ? toolCalls.slice(0, 1) : toolCalls
+                const toolCallsToShow = toolCallsToShowBase.map((tc, index) => ({
+                  ...tc,
+                  order: typeof tc.order === "number" ? tc.order : index,
+                  inline: false,
+                }))
+                const contentWithToolPlaceholders = removeToolCalls(lastVisibleText, {
+                  toolCalls: toolCallsToShow,
+                }).trim()
 
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessageId
                       ? {
                           ...msg,
+                          content: contentWithToolPlaceholders || "Processing...",
                           toolCalls: toolCallsToShow,
                         }
                       : msg
@@ -1928,7 +1981,7 @@ export function ChatWindow() {
   }, [messages])
 
   return (
-    <div className="flex h-screen flex-col bg-[#0F1115] text-[#E7E9EC]">
+    <div className="flex h-screen min-h-0 flex-col bg-[#0F1115] text-[#E7E9EC]">
       {/* Header - Minimal */}
       <div className="border-b border-[#22272F] bg-[#0F1115] px-4 py-2">
         <div className="flex items-center gap-2">
@@ -1944,7 +1997,7 @@ export function ChatWindow() {
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="space-y-4 px-4 py-4 overflow-x-hidden">
           {messages.map((message) => {
             // Handle thinking messages
@@ -1975,6 +2028,31 @@ export function ChatWindow() {
                 </div>
               )
             }
+
+            const renderInlineToolCall = (toolProps: any) => {
+              if (!message.toolCalls || message.toolCalls.length === 0) {
+                return null
+              }
+              const toolId =
+                toolProps?.["data-tool-id"] ||
+                toolProps?.["dataToolId"] ||
+                toolProps?.id
+              if (!toolId) return null
+              const toolCall = message.toolCalls.find((tc) => tc.id === toolId)
+              if (!toolCall) return null
+              return (
+                <div className="my-2">
+                  <ToolCallComponent
+                    toolCall={toolCall}
+                    onAccept={() => handleToolCallAccept(message.id, toolCall.id)}
+                    onUndo={() => handleToolCallUndo(message.id, toolCall.id)}
+                  />
+                </div>
+              )
+            }
+
+            const remainingToolCalls =
+              message.toolCalls?.filter((tc) => !tc.inline) ?? []
 
             return (
               <div key={message.id} className="space-y-4">
@@ -2029,6 +2107,7 @@ export function ChatWindow() {
                             {children}
                           </a>
                         ),
+                        ["tool-call"]: renderInlineToolCall,
                       }}
                     >
                       {message.content}
@@ -2080,9 +2159,9 @@ export function ChatWindow() {
                 )}
 
                 {/* Tool Calls - Compact display */}
-                {message.toolCalls && message.toolCalls.length > 0 && (
+                {remainingToolCalls.length > 0 && (
                   <div className="ml-9 space-y-2">
-                    {message.toolCalls.map((toolCall) => (
+                    {remainingToolCalls.map((toolCall) => (
                       <ToolCallComponent
                         key={toolCall.id}
                         toolCall={toolCall}
