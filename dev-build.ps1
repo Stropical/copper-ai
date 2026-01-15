@@ -173,6 +173,35 @@ function Resolve-BuildDir([string]$PresetName) {
         $binaryDir = $preset.binaryDir
     }
     if (-not $binaryDir) {
+        $visited = @{}
+        $stack = New-Object System.Collections.Generic.Stack[object]
+        $stack.Push($preset)
+        while ($stack.Count -gt 0) {
+            $current = $stack.Pop()
+            if (-not $current -or -not $current.name) { continue }
+            if ($visited.ContainsKey($current.name)) { continue }
+            $visited[$current.name] = $true
+
+            if ($current.PSObject.Properties.Name -contains "binaryDir") {
+                $binaryDir = $current.binaryDir
+                break
+            }
+
+            if ($current.PSObject.Properties.Name -contains "inherits") {
+                $inherits = $current.inherits
+                if ($inherits -is [string]) {
+                    $inherits = @($inherits)
+                }
+                foreach ($parentName in $inherits) {
+                    $parent = $presetJson.configurePresets | Where-Object { $_.name -eq $parentName } | Select-Object -First 1
+                    if ($parent) {
+                        $stack.Push($parent)
+                    }
+                }
+            }
+        }
+    }
+    if (-not $binaryDir) {
         return (Join-Path $RepoRoot ("build\" + $PresetName))
     }
     $binaryDir = $binaryDir.Replace('${sourceDir}', $RepoRoot)
@@ -294,6 +323,10 @@ if ($Action -eq "clean") {
 if ($Action -eq "configure") {
     Info "Configuring CMake..."
     & cmake --preset $ConfigurePreset
+    if ($LASTEXITCODE -ne 0) {
+        Err "CMake configure failed."
+        exit $LASTEXITCODE
+    }
     Ok "Configure completed"
     exit 0
 }
@@ -301,6 +334,10 @@ if ($Action -eq "configure") {
 if (-not (Test-Path $CachePath)) {
     Info "Configuring CMake..."
     & cmake --preset $ConfigurePreset
+    if ($LASTEXITCODE -ne 0) {
+        Err "CMake configure failed."
+        exit $LASTEXITCODE
+    }
 }
 
 if ($Action -ne "run") {
@@ -308,6 +345,10 @@ if ($Action -ne "run") {
     $buildArgs = @("--build", "--preset", $BuildPreset)
     if ($Jobs) { $buildArgs += @("--parallel", $Jobs) }
     & cmake @buildArgs
+    if ($LASTEXITCODE -ne 0) {
+        Err "CMake build failed."
+        exit $LASTEXITCODE
+    }
 }
 
 if ($Action -ne "build") {
