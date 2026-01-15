@@ -2592,300 +2592,331 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleApplyPatchTool( const json& aPayload )
 {
     wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting execution" ) );
 
-    if( !m_frame || !aPayload.is_object() )
-    {
-        m_lastToolError = _( "Invalid payload for apply_patch" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-
-    if( !aPayload.contains( "patch" ) || !aPayload["patch"].is_string() )
-    {
-        m_lastToolError = _( "apply_patch requires 'patch' (string) parameter" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-
-    wxString patch = wxString::FromUTF8( aPayload["patch"].get<std::string>() );
-    wxString commitMessage = _( "Applied patch via AI agent" );
-
-    if( aPayload.contains( "commit_message" ) && aPayload["commit_message"].is_string() )
-    {
-        commitMessage = wxString::FromUTF8( aPayload["commit_message"].get<std::string>() );
-    }
-
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch length=%zu, commit_message='%s'" ), patch.length(),
-                  commitMessage );
-
-    // Get current schematic file path
-    wxString currentPath = m_frame->GetCurrentFileName();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Current file path='%s'" ), currentPath );
-
-    if( currentPath.IsEmpty() )
-    {
-        m_lastToolError = _( "No schematic file is currently open" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-
-    // Read current file contents
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Opening file for reading" ) );
-    wxFile file( currentPath, wxFile::read );
-    if( !file.IsOpened() )
-    {
-        m_lastToolError = wxString::Format( _( "Failed to open schematic file: %s" ), currentPath );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-
-    wxString fileContents;
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading file contents" ) );
-    if( !file.ReadAll( &fileContents ) )
-    {
-        m_lastToolError = _( "Failed to read schematic file" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-    file.Close();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: File read successfully, size=%zu bytes" ), fileContents.length() );
-
-    // Apply patch using system patch command
-    // Create temporary files for patch and output
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary files" ) );
-    wxString tempDir = wxFileName::GetTempDir();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Temp directory='%s'" ), tempDir );
-
-    wxString patchFile =
-            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_patch_" ) );
-    wxString inputFile =
-            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_input_" ) );
-    wxString outputFile = inputFile + wxS( ".patched" );
-
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: patchFile='%s'" ), patchFile );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: inputFile='%s'" ), inputFile );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: outputFile='%s'" ), outputFile );
-
-    // Write patch to temp file
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patch to temp file" ) );
-    wxFile patchF( patchFile, wxFile::write );
-    if( !patchF.IsOpened() || !patchF.Write( patch ) )
-    {
-        m_lastToolError = _( "Failed to write patch to temporary file" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( patchFile );
-        wxRemoveFile( inputFile );
-        return false;
-    }
-    patchF.Close();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch file written successfully" ) );
-
-    // Write current contents to temp file
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing input to temp file" ) );
-    wxFile inputF( inputFile, wxFile::write );
-    if( !inputF.IsOpened() || !inputF.Write( fileContents ) )
-    {
-        m_lastToolError = _( "Failed to write input to temporary file" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( patchFile );
-        wxRemoveFile( inputFile );
-        return false;
-    }
-    inputF.Close();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Input file written successfully" ) );
-
-    // Apply patch using system command
-    wxString patchCmd = wxString::Format( wxS( "patch -s -o %s %s %s" ), outputFile, inputFile, patchFile );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing patch command: %s" ), patchCmd );
-
-    wxArrayString output, errors;
-    int           result = wxExecute( patchCmd, output, errors, wxEXEC_SYNC );
-
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch command completed with result=%d" ), result );
-    if( !output.IsEmpty() )
-    {
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch output: %s" ), output[0] );
-    }
-    if( !errors.IsEmpty() )
-    {
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch errors: %s" ), errors[0] );
-    }
-
-    // Clean up patch and input files
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Cleaning up temp files" ) );
-    wxRemoveFile( patchFile );
-    wxRemoveFile( inputFile );
-
-    if( result != 0 )
-    {
-        wxString errorMsg = _( "Failed to apply patch" );
-        if( !errors.IsEmpty() )
-        {
-            errorMsg += wxS( ": " ) + errors[0];
-        }
-        m_lastToolError = errorMsg;
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( outputFile );
-        return false;
-    }
-
-    // Read patched contents
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading patched file" ) );
-    wxFile outputF( outputFile, wxFile::read );
-    if( !outputF.IsOpened() )
-    {
-        m_lastToolError = _( "Failed to read patched file" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( outputFile );
-        return false;
-    }
-
-    wxString patchedContents;
-    if( !outputF.ReadAll( &patchedContents ) )
-    {
-        m_lastToolError = _( "Failed to read patched contents" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( outputFile );
-        return false;
-    }
-    outputF.Close();
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patched file read, size=%zu bytes" ), patchedContents.length() );
-
-    // Write patched contents to another temp file for loading
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patched contents to load file" ) );
-    wxString loadFile =
-            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) );
-    wxFile loadF( loadFile, wxFile::write );
-    if( !loadF.IsOpened() || !loadF.Write( patchedContents ) )
-    {
-        m_lastToolError = _( "Failed to write patched contents for loading" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( outputFile );
-        wxRemoveFile( loadFile );
-        return false;
-    }
-    loadF.Close();
-    wxRemoveFile( outputFile );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Load file='%s'" ), loadFile );
-
-    // Load patched schematic using SCH_IO
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating SCH_IO plugin" ) );
-    SCH_IO_MGR::SCH_FILE_T fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( loadFile, KICTL_KICAD_ONLY );
-    IO_RELEASER<SCH_IO>    io( SCH_IO_MGR::FindPlugin( fileType ) );
-
-    if( !io )
-    {
-        m_lastToolError = _( "Failed to create schematic IO plugin" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( loadFile );
-        return false;
-    }
-
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary schematic" ) );
-    SCHEMATIC tempSchematic( &m_frame->Schematic().Project() );
-    tempSchematic.CreateDefaultScreens();
-
-    SCH_SHEET* newRootSheet = nullptr;
     try
     {
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Loading patched schematic file" ) );
-        newRootSheet = io->LoadSchematicFile( loadFile, &tempSchematic );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Schematic loaded successfully" ) );
+        if( !m_frame || !aPayload.is_object() )
+        {
+            m_lastToolError = _( "Invalid payload for apply_patch" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        if( !aPayload.contains( "patch" ) || !aPayload["patch"].is_string() )
+        {
+            m_lastToolError = _( "apply_patch requires 'patch' (string) parameter" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        wxString patch = wxString::FromUTF8( aPayload["patch"].get<std::string>() );
+        wxString commitMessage = _( "Applied patch via AI agent" );
+
+        if( aPayload.contains( "commit_message" ) && aPayload["commit_message"].is_string() )
+        {
+            commitMessage = wxString::FromUTF8( aPayload["commit_message"].get<std::string>() );
+        }
+
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch length=%zu, commit_message='%s'" ), patch.length(),
+                      commitMessage );
+
+        // Get current schematic file path
+        wxString currentPath = m_frame->GetCurrentFileName();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Current file path='%s'" ), currentPath );
+
+        if( currentPath.IsEmpty() )
+        {
+            m_lastToolError = _( "No schematic file is currently open" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        // Read current file contents
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Opening file for reading" ) );
+        wxFile file( currentPath, wxFile::read );
+        if( !file.IsOpened() )
+        {
+            m_lastToolError = wxString::Format( _( "Failed to open schematic file: %s" ), currentPath );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        wxString fileContents;
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading file contents" ) );
+        if( !file.ReadAll( &fileContents ) )
+        {
+            m_lastToolError = _( "Failed to read schematic file" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+        file.Close();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: File read successfully, size=%zu bytes" ),
+                      fileContents.length() );
+
+        // Apply patch using system patch command
+        // Create temporary files for patch and output
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary files" ) );
+        wxString tempDir = wxFileName::GetTempDir();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Temp directory='%s'" ), tempDir );
+
+        wxString patchFile =
+                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_patch_" ) );
+        wxString inputFile =
+                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_input_" ) );
+        wxString outputFile = inputFile + wxS( ".patched" );
+
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: patchFile='%s'" ), patchFile );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: inputFile='%s'" ), inputFile );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: outputFile='%s'" ), outputFile );
+
+        // Write patch to temp file
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patch to temp file" ) );
+        wxFile patchF( patchFile, wxFile::write );
+        if( !patchF.IsOpened() || !patchF.Write( patch ) )
+        {
+            m_lastToolError = _( "Failed to write patch to temporary file" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( patchFile );
+            wxRemoveFile( inputFile );
+            return false;
+        }
+        patchF.Close();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch file written successfully" ) );
+
+        // Write current contents to temp file
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing input to temp file" ) );
+        wxFile inputF( inputFile, wxFile::write );
+        if( !inputF.IsOpened() || !inputF.Write( fileContents ) )
+        {
+            m_lastToolError = _( "Failed to write input to temporary file" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( patchFile );
+            wxRemoveFile( inputFile );
+            return false;
+        }
+        inputF.Close();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Input file written successfully" ) );
+
+        // Apply patch using system command
+        // Use -f to force non-interactive mode (never prompt)
+        wxString patchCmd = wxString::Format( wxS( "patch -s -f -o %s %s %s 2>&1" ), outputFile, inputFile, patchFile );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing patch command: %s" ), patchCmd );
+
+        // Use popen instead of wxExecute to avoid blocking the GUI thread
+        FILE* pipe = popen( patchCmd.mb_str(), "r" );
+        if( !pipe )
+        {
+            m_lastToolError = _( "Failed to execute patch command" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( patchFile );
+            wxRemoveFile( inputFile );
+            return false;
+        }
+
+        // Read output
+        char     buffer[256];
+        wxString patchOutput;
+        while( fgets( buffer, sizeof( buffer ), pipe ) != nullptr )
+        {
+            patchOutput += wxString::FromUTF8( buffer );
+        }
+
+        int result = pclose( pipe );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch command completed with result=%d" ), result );
+
+        if( !patchOutput.IsEmpty() )
+        {
+            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch output: %s" ), patchOutput );
+        }
+
+        // Clean up patch and input files
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Cleaning up temp files" ) );
+        wxRemoveFile( patchFile );
+        wxRemoveFile( inputFile );
+
+        if( result != 0 )
+        {
+            wxString errorMsg = _( "Failed to apply patch" );
+            if( !patchOutput.IsEmpty() )
+            {
+                errorMsg += wxS( ": " ) + patchOutput;
+            }
+            m_lastToolError = errorMsg;
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( outputFile );
+            return false;
+        }
+
+        // Read patched contents
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading patched file" ) );
+        wxFile outputF( outputFile, wxFile::read );
+        if( !outputF.IsOpened() )
+        {
+            m_lastToolError = _( "Failed to read patched file" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( outputFile );
+            return false;
+        }
+
+        wxString patchedContents;
+        if( !outputF.ReadAll( &patchedContents ) )
+        {
+            m_lastToolError = _( "Failed to read patched contents" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( outputFile );
+            return false;
+        }
+        outputF.Close();
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patched file read, size=%zu bytes" ), patchedContents.length() );
+
+        // Write patched contents to another temp file for loading
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patched contents to load file" ) );
+        wxString loadFile =
+                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) );
+        wxFile loadF( loadFile, wxFile::write );
+        if( !loadF.IsOpened() || !loadF.Write( patchedContents ) )
+        {
+            m_lastToolError = _( "Failed to write patched contents for loading" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( outputFile );
+            wxRemoveFile( loadFile );
+            return false;
+        }
+        loadF.Close();
+        wxRemoveFile( outputFile );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Load file='%s'" ), loadFile );
+
+        // Load patched schematic using SCH_IO
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating SCH_IO plugin" ) );
+        SCH_IO_MGR::SCH_FILE_T fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( loadFile, KICTL_KICAD_ONLY );
+        IO_RELEASER<SCH_IO>    io( SCH_IO_MGR::FindPlugin( fileType ) );
+
+        if( !io )
+        {
+            m_lastToolError = _( "Failed to create schematic IO plugin" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( loadFile );
+            return false;
+        }
+
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary schematic" ) );
+        SCHEMATIC tempSchematic( &m_frame->Schematic().Project() );
+        tempSchematic.CreateDefaultScreens();
+
+        SCH_SHEET* newRootSheet = nullptr;
+        try
+        {
+            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Loading patched schematic file" ) );
+            newRootSheet = io->LoadSchematicFile( loadFile, &tempSchematic );
+            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Schematic loaded successfully" ) );
+        }
+        catch( const std::exception& e )
+        {
+            m_lastToolError =
+                    wxString::Format( _( "Failed to load patched schematic: %s" ), wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            wxRemoveFile( loadFile );
+            return false;
+        }
+
+        wxRemoveFile( loadFile );
+
+        if( !newRootSheet )
+        {
+            m_lastToolError = _( "Failed to load patched schematic" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        tempSchematic.SetTopLevelSheets( { newRootSheet } );
+
+        // Use SCH_COMMIT to replace items in RAM
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting SCH_COMMIT operations" ) );
+        SCH_COMMIT  commit( m_frame );
+        SCH_SCREEN* currentScreen = m_frame->GetScreen();
+        SCH_SCREEN* newScreen = newRootSheet->GetScreen();
+
+        if( !currentScreen || !newScreen )
+        {
+            m_lastToolError = _( "Invalid screen state" );
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
+        }
+
+        // Remove all existing items
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Removing existing items" ) );
+        std::vector<SCH_ITEM*> itemsToRemove;
+        for( SCH_ITEM* item : currentScreen->Items() )
+        {
+            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+            {
+                itemsToRemove.push_back( item );
+            }
+        }
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to remove" ), itemsToRemove.size() );
+
+        for( SCH_ITEM* item : itemsToRemove )
+        {
+            commit.Remove( item, currentScreen );
+        }
+
+        // Add all new items
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Adding new items" ) );
+        std::vector<SCH_ITEM*> itemsToAdd;
+        for( SCH_ITEM* item : newScreen->Items() )
+        {
+            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+            {
+                SCH_ITEM* clonedItem = static_cast<SCH_ITEM*>( item->Clone() );
+                itemsToAdd.push_back( clonedItem );
+            }
+        }
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to add" ), itemsToAdd.size() );
+
+        for( SCH_ITEM* item : itemsToAdd )
+        {
+            commit.Add( item, currentScreen );
+        }
+
+        // Push commit - this automatically handles:
+        // - Undo/redo
+        // - Screen updates
+        // - View updates
+        // - Connectivity recalculation
+        // - Hierarchy refresh
+        // - UI events
+        // - Canvas refresh
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Pushing commit with message='%s'" ), commitMessage );
+        commit.Push( commitMessage );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed successfully" ) );
+
+        // Update connectivity and hierarchy
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing hierarchy and connectivity" ) );
+        m_frame->Schematic().RefreshHierarchy();
+        m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+
+        if( m_frame->GetCanvas() )
+        {
+            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
+            m_frame->GetCanvas()->Refresh();
+        }
+
+        m_lastToolResult = wxS( "{\"ok\": true, \"message\": \"Patch applied successfully\"}" );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: COMPLETED SUCCESSFULLY" ) );
+
+        return true;
     }
     catch( const std::exception& e )
     {
-        m_lastToolError =
-                wxString::Format( _( "Failed to load patched schematic: %s" ), wxString::FromUTF8( e.what() ) );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        wxRemoveFile( loadFile );
+        m_lastToolError = wxString::Format( _( "Exception during apply_patch: %s" ), wxString::FromUTF8( e.what() ) );
+        wxLogError( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
         return false;
     }
-
-    wxRemoveFile( loadFile );
-
-    if( !newRootSheet )
+    catch( ... )
     {
-        m_lastToolError = _( "Failed to load patched schematic" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        m_lastToolError = _( "Unknown exception during apply_patch" );
+        wxLogError( wxS( "[OllamaAgent] apply_patch: Unknown exception caught" ) );
         return false;
     }
-
-    tempSchematic.SetTopLevelSheets( { newRootSheet } );
-
-    // Use SCH_COMMIT to replace items in RAM
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting SCH_COMMIT operations" ) );
-    SCH_COMMIT  commit( m_frame );
-    SCH_SCREEN* currentScreen = m_frame->GetScreen();
-    SCH_SCREEN* newScreen = newRootSheet->GetScreen();
-
-    if( !currentScreen || !newScreen )
-    {
-        m_lastToolError = _( "Invalid screen state" );
-        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-
-    // Remove all existing items
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Removing existing items" ) );
-    std::vector<SCH_ITEM*> itemsToRemove;
-    for( SCH_ITEM* item : currentScreen->Items() )
-    {
-        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
-        {
-            itemsToRemove.push_back( item );
-        }
-    }
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to remove" ), itemsToRemove.size() );
-
-    for( SCH_ITEM* item : itemsToRemove )
-    {
-        commit.Remove( item, currentScreen );
-    }
-
-    // Add all new items
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Adding new items" ) );
-    std::vector<SCH_ITEM*> itemsToAdd;
-    for( SCH_ITEM* item : newScreen->Items() )
-    {
-        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
-        {
-            SCH_ITEM* clonedItem = static_cast<SCH_ITEM*>( item->Clone() );
-            itemsToAdd.push_back( clonedItem );
-        }
-    }
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to add" ), itemsToAdd.size() );
-
-    for( SCH_ITEM* item : itemsToAdd )
-    {
-        commit.Add( item, currentScreen );
-    }
-
-    // Push commit - this automatically handles:
-    // - Undo/redo
-    // - Screen updates
-    // - View updates
-    // - Connectivity recalculation
-    // - Hierarchy refresh
-    // - UI events
-    // - Canvas refresh
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Pushing commit with message='%s'" ), commitMessage );
-    commit.Push( commitMessage );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed successfully" ) );
-
-    // Update connectivity and hierarchy
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing hierarchy and connectivity" ) );
-    m_frame->Schematic().RefreshHierarchy();
-    m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
-
-    if( m_frame->GetCanvas() )
-    {
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
-        m_frame->GetCanvas()->Refresh();
-    }
-
-    m_lastToolResult = wxS( "{\"ok\": true, \"message\": \"Patch applied successfully\"}" );
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: COMPLETED SUCCESSFULLY" ) );
-
-    return true;
 }
 
 
