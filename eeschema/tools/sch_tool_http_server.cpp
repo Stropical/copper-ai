@@ -22,6 +22,8 @@
 #include <wx/socket.h>
 #include <wx/log.h>
 #include <wx/string.h>
+#include <wx/app.h>
+#include <wx/thread.h>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -238,8 +240,20 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
 
         ~SOCKET_SCOPE_CLOSER()
         {
-            if( socket )
-                socket->Close();
+            // Defensive checks to avoid wxWidgets macOS CFRelease(NULL) crash in sockosx.cpp
+            if( socket && socket->IsOk() )
+            {
+                try
+                {
+                    // Only close if socket is in a valid state
+                    socket->Close();
+                }
+                catch( ... )
+                {
+                    // Swallow any exceptions during socket close to prevent crash
+                    wxLogWarning( wxS( "[HTTP Server] Exception during socket close" ) );
+                }
+            }
         }
     } socketCloser{ aSocket };
 
@@ -704,8 +718,40 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                                     wxT( "TOOL_NOT_IMPLEMENTED" ) );
     }
 
-    // Execute tool command (tool pointer is still valid from above)
-    bool success = tool->RunToolCommand( mappedToolName, mappedArgsJson );
+    // Execute tool command (tool pointer is still valid from above) on the main thread
+    // This is required to prevent crashes due to cross-thread GUI operations (e.g. OpenGL, canvas updates)
+    bool success = false;
+
+    // We use a semaphore to wait for the main thread to complete the execution
+    struct TOOL_CONTEXT
+    {
+        SCH_OLLAMA_AGENT_TOOL* tool;
+        wxString               name;
+        wxString               payload;
+        bool                   success;
+        wxSemaphore            semaphore;
+    } context;
+
+    context.tool = tool;
+    context.name = mappedToolName;
+    context.payload = mappedArgsJson;
+    context.success = false;
+
+    wxTheApp->CallAfter(
+            [&context]()
+            {
+                context.success = context.tool->RunToolCommand( context.name, context.payload );
+                context.semaphore.Post();
+            } );
+
+    // Wait for the main thread to complete (with a 60s safety timeout to avoid permanent hang if main thread is gone)
+    if( context.semaphore.WaitTimeout( 60000 ) != wxSEMA_NO_ERROR )
+    {
+        wxLogWarning( wxS( "[ToolServer] Timeout waiting for main thread to execute tool '%s'" ), mappedToolName );
+        return CreateErrorResponse( wxS( "Main thread timeout" ), wxS( "MAIN_THREAD_TIMEOUT" ) );
+    }
+
+    success = context.success;
 
     if( success )
     {

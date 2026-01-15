@@ -2770,8 +2770,10 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleApplyPatchTool( const json& aPayload )
 
         // Write patched contents to another temp file for loading
         wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patched contents to load file" ) );
+        // IMPORTANT: Must have .kicad_sch extension for SCH_IO_MGR::GuessPluginTypeFromSchPath to work
         wxString loadFile =
-                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) );
+                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) )
+                + wxS( ".kicad_sch" );
         wxFile loadF( loadFile, wxFile::write );
         if( !loadF.IsOpened() || !loadF.Write( patchedContents ) )
         {
@@ -2877,27 +2879,67 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleApplyPatchTool( const json& aPayload )
             commit.Add( item, currentScreen );
         }
 
-        // Push commit - this automatically handles:
-        // - Undo/redo
-        // - Screen updates
-        // - View updates
-        // - Connectivity recalculation
-        // - Hierarchy refresh
-        // - UI events
-        // - Canvas refresh
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Pushing commit with message='%s'" ), commitMessage );
-        commit.Push( commitMessage );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed successfully" ) );
+        // GUI operations (commit.Push, RefreshHierarchy, GetCanvas()->Refresh) MUST run on main thread
+        // Use CallAfter with synchronization to wait for completion
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Dispatching GUI operations to main thread" ) );
 
-        // Update connectivity and hierarchy
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing hierarchy and connectivity" ) );
-        m_frame->Schematic().RefreshHierarchy();
-        m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+        std::mutex              commitMutex;
+        std::condition_variable commitCV;
+        bool                    commitDone = false;
+        bool                    commitSuccess = false;
+        wxString                commitError;
 
-        if( m_frame->GetCanvas() )
+        m_frame->CallAfter(
+                [&, commitMessage]()
+                {
+                    try
+                    {
+                        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing on main thread - pushing commit" ) );
+                        commit.Push( commitMessage );
+                        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed, refreshing hierarchy" ) );
+                        m_frame->Schematic().RefreshHierarchy();
+                        m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+
+                        if( m_frame->GetCanvas() )
+                        {
+                            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
+                            m_frame->GetCanvas()->Refresh();
+                        }
+
+                        commitSuccess = true;
+                    }
+                    catch( const std::exception& e )
+                    {
+                        commitError =
+                                wxString::Format( _( "GUI operations failed: %s" ), wxString::FromUTF8( e.what() ) );
+                        wxLogError( wxS( "[OllamaAgent] apply_patch: %s" ), commitError );
+                    }
+                    catch( ... )
+                    {
+                        commitError = _( "Unknown error during GUI operations" );
+                        wxLogError( wxS( "[OllamaAgent] apply_patch: Unknown exception" ) );
+                    }
+
+                    std::lock_guard<std::mutex> lock( commitMutex );
+                    commitDone = true;
+                    commitCV.notify_one();
+                } );
+
+        // Wait for main thread to complete
         {
-            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
-            m_frame->GetCanvas()->Refresh();
+            std::unique_lock<std::mutex> lock( commitMutex );
+            commitCV.wait( lock,
+                           [&]
+                           {
+                               return commitDone;
+                           } );
+        }
+
+        if( !commitSuccess )
+        {
+            m_lastToolError = commitError;
+            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+            return false;
         }
 
         m_lastToolResult = wxS( "{\"ok\": true, \"message\": \"Patch applied successfully\"}" );
