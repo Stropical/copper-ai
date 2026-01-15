@@ -28,12 +28,12 @@
 
 using json = nlohmann::json;
 
-SCH_TOOL_HTTP_SERVER::SCH_TOOL_HTTP_SERVER( SCH_OLLAMA_AGENT_TOOL* aTool, int aPort )
-    : wxThread( wxTHREAD_JOINABLE ),
-      m_tool( aTool ),
-      m_port( aPort ),
-      m_running( false ),
-      m_server( nullptr )
+SCH_TOOL_HTTP_SERVER::SCH_TOOL_HTTP_SERVER( SCH_OLLAMA_AGENT_TOOL* aTool, int aPort ) :
+        wxThread( wxTHREAD_JOINABLE ),
+        m_tool( aTool ),
+        m_port( aPort ),
+        m_running( false ),
+        m_server( nullptr )
 {
 }
 
@@ -42,7 +42,7 @@ SCH_TOOL_HTTP_SERVER::~SCH_TOOL_HTTP_SERVER()
 {
     // Ensure server is stopped and thread is joined before destruction
     StopServer();
-    
+
     // Tool pointer is already cleared in StopServer(), no need to access mutex here
     // as the thread is guaranteed to be stopped
 }
@@ -134,7 +134,7 @@ void SCH_TOOL_HTTP_SERVER::StopServer()
         {
             m_server->Close();
         }
-        
+
         // Clear tool pointer to prevent access to potentially destroyed object
         m_tool = nullptr;
     }
@@ -177,7 +177,7 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
     {
         // Check if we should stop (check frequently to allow quick shutdown)
         // Use a local copy of m_running to avoid holding mutex for long
-        bool shouldRun = false;
+        bool            shouldRun = false;
         wxSocketServer* server = nullptr;
         {
             wxMutexLocker lock( m_mutex );
@@ -191,10 +191,10 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
                     shouldRun = false;
             }
         }
-        
+
         if( !shouldRun || !server )
             break;
-        
+
         // Check for new connections (non-blocking)
         // Note: server might be closed between the check above and here,
         // but Accept() will handle that gracefully
@@ -224,7 +224,7 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
 {
     if( !aSocket || !aSocket->IsOk() )
         return;
-    
+
     // Check if we're shutting down before handling client
     {
         wxMutexLocker lock( m_mutex );
@@ -244,8 +244,8 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     } socketCloser{ aSocket };
 
     // Read request
-    char buffer[8192];
-    size_t totalRead = 0;
+    char     buffer[8192];
+    size_t   totalRead = 0;
     wxString request;
 
     aSocket->SetTimeout( 5 ); // 5 second timeout
@@ -257,12 +257,12 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     // Then read body if Content-Length is specified
     bool headersComplete = false;
     long contentLength = 0;
-    int headerEndPos = wxNOT_FOUND;
-    
+    int  headerEndPos = wxNOT_FOUND;
+
     // First, read until we get headers (ends with \r\n\r\n)
-    int readAttempts = 0;
+    int       readAttempts = 0;
     const int maxReadAttempts = 100; // Max ~5 seconds (100 * 50ms timeout)
-    
+
     while( totalRead < sizeof( buffer ) - 1 && !headersComplete && readAttempts < maxReadAttempts )
     {
         // Check if we're shutting down
@@ -271,11 +271,11 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
             if( !m_running )
                 return; // Exit immediately if shutting down
         }
-        
+
         size_t toRead = sizeof( buffer ) - totalRead - 1;
         if( toRead == 0 )
             break;
-            
+
         aSocket->Read( buffer + totalRead, toRead );
         size_t bytesRead = aSocket->LastCount();
 
@@ -299,7 +299,7 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
                 break;
             continue;
         }
-        
+
         readAttempts = 0; // Reset counter on successful read
 
         totalRead += bytesRead;
@@ -308,17 +308,17 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
         // Check if we have complete headers
         wxString currentRequest = wxString::FromUTF8( buffer, totalRead );
         headerEndPos = currentRequest.Find( wxT( "\r\n\r\n" ) );
-        
+
         if( headerEndPos != wxNOT_FOUND )
         {
             headersComplete = true;
-            
+
             // Parse Content-Length header
             wxString headers = currentRequest.Left( headerEndPos );
-            int contentLengthPos = headers.Lower().Find( wxT( "content-length:" ) );
+            int      contentLengthPos = headers.Lower().Find( wxT( "content-length:" ) );
             if( contentLengthPos != wxNOT_FOUND )
             {
-                size_t colonPos = static_cast<size_t>( contentLengthPos + 15 ); // length of "content-length:"
+                size_t   colonPos = static_cast<size_t>( contentLengthPos + 15 ); // length of "content-length:"
                 wxString lengthStr = headers.Mid( colonPos );
                 lengthStr.Trim( false ).Trim( true ); // trim whitespace
                 int crlfPos = lengthStr.Find( wxT( "\r\n" ) );
@@ -329,18 +329,18 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
             break;
         }
     }
-    
+
     // If we have headers, read body if Content-Length is specified
     if( headersComplete && contentLength > 0 )
     {
-        size_t bodyStart = static_cast<size_t>( headerEndPos ) + 4; // Skip "\r\n\r\n"
-        size_t bodyRead = totalRead - bodyStart;
-        int bodyReadAttempts = 0;
+        size_t    bodyStart = static_cast<size_t>( headerEndPos ) + 4; // Skip "\r\n\r\n"
+        size_t    bodyRead = totalRead - bodyStart;
+        int       bodyReadAttempts = 0;
         const int maxBodyReadAttempts = 50; // Max ~2.5 seconds for body
-        
+
         // Read remaining body data
-        while( bodyRead < (size_t)contentLength && totalRead < sizeof( buffer ) - 1 && 
-               bodyReadAttempts < maxBodyReadAttempts )
+        while( bodyRead < (size_t) contentLength && totalRead < sizeof( buffer ) - 1
+               && bodyReadAttempts < maxBodyReadAttempts )
         {
             // Check if we're shutting down
             {
@@ -348,15 +348,15 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
                 if( !m_running )
                     return; // Exit immediately if shutting down
             }
-            
-            size_t toRead = (size_t)contentLength - bodyRead;
+
+            size_t toRead = (size_t) contentLength - bodyRead;
             size_t maxRead = sizeof( buffer ) - totalRead - 1;
             if( toRead > maxRead )
                 toRead = maxRead;
-                
+
             aSocket->Read( buffer + totalRead, toRead );
             size_t bytesRead = aSocket->LastCount();
-            
+
             if( bytesRead == 0 )
             {
                 if( !aSocket->IsOk() || aSocket->Error() )
@@ -367,7 +367,7 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
                     break;
                 continue;
             }
-            
+
             totalRead += bytesRead;
             buffer[totalRead] = '\0';
             bodyRead = totalRead - bodyStart;
@@ -386,13 +386,13 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
         SendResponse( aSocket, 400, wxT( "text/plain" ), wxT( "Bad Request - No data received" ) );
         return;
     }
-    
+
     if( !headersComplete )
     {
         // Headers incomplete - try to parse what we have anyway
         wxString partialRequest = wxString::FromUTF8( buffer, totalRead );
-        if( partialRequest.Find( wxT( "\r\n\r\n" ) ) == wxNOT_FOUND && 
-            partialRequest.Find( wxT( "\n\n" ) ) == wxNOT_FOUND )
+        if( partialRequest.Find( wxT( "\r\n\r\n" ) ) == wxNOT_FOUND
+            && partialRequest.Find( wxT( "\n\n" ) ) == wxNOT_FOUND )
         {
             SendResponse( aSocket, 400, wxT( "text/plain" ), wxT( "Bad Request - Incomplete headers" ) );
             return;
@@ -412,9 +412,9 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     // Handle CORS preflight
     if( method == wxT( "OPTIONS" ) )
     {
-        wxString corsHeaders = wxT( "Access-Control-Allow-Origin: *\r\n" )
-                               wxT( "Access-Control-Allow-Methods: POST, OPTIONS\r\n" )
-                               wxT( "Access-Control-Allow-Headers: Content-Type\r\n" );
+        wxString corsHeaders =
+                wxT( "Access-Control-Allow-Origin: *\r\n" ) wxT( "Access-Control-Allow-Methods: POST, OPTIONS\r\n" )
+                        wxT( "Access-Control-Allow-Headers: Content-Type\r\n" );
         wxString response = wxString::Format( wxT( "HTTP/1.1 200 OK\r\n%s\r\n\r\n" ), corsHeaders );
         aSocket->Write( response.mb_str(), response.length() );
         return;
@@ -431,17 +431,16 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     try
     {
         json requestJson = json::parse( body.ToStdString() );
-        
+
         if( !requestJson.is_object() || !requestJson.contains( "tool" ) )
         {
-            SendResponse( aSocket, 400, wxT( "application/json" ), 
-                         CreateErrorResponse( wxT( "Missing 'tool' field in request" ), 
-                                            wxT( "INVALID_REQUEST" ) ) );
+            SendResponse( aSocket, 400, wxT( "application/json" ),
+                          CreateErrorResponse( wxT( "Missing 'tool' field in request" ), wxT( "INVALID_REQUEST" ) ) );
             return;
         }
 
         wxString toolName = wxString::FromUTF8( requestJson["tool"].get<std::string>() );
-        json args = requestJson.value( "args", json::object() );
+        json     args = requestJson.value( "args", json::object() );
         wxString argsJson = wxString::FromUTF8( args.dump() );
 
         // Execute tool
@@ -452,23 +451,19 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
     }
     catch( const json::exception& e )
     {
-        wxString errorMsg = wxString::Format( wxT( "JSON parse error: %s" ), 
-                                             wxString::FromUTF8( e.what() ) );
-        SendResponse( aSocket, 400, wxT( "application/json" ), 
-                     CreateErrorResponse( errorMsg, wxT( "INVALID_JSON" ) ) );
+        wxString errorMsg = wxString::Format( wxT( "JSON parse error: %s" ), wxString::FromUTF8( e.what() ) );
+        SendResponse( aSocket, 400, wxT( "application/json" ), CreateErrorResponse( errorMsg, wxT( "INVALID_JSON" ) ) );
     }
     catch( const std::exception& e )
     {
-        wxString errorMsg = wxString::Format( wxT( "Error: %s" ), 
-                                             wxString::FromUTF8( e.what() ) );
-        SendResponse( aSocket, 500, wxT( "application/json" ), 
-                     CreateErrorResponse( errorMsg, wxT( "INTERNAL_ERROR" ) ) );
+        wxString errorMsg = wxString::Format( wxT( "Error: %s" ), wxString::FromUTF8( e.what() ) );
+        SendResponse( aSocket, 500, wxT( "application/json" ),
+                      CreateErrorResponse( errorMsg, wxT( "INTERNAL_ERROR" ) ) );
     }
 }
 
 
-bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMethod, 
-                                         wxString& aPath, wxString& aBody )
+bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMethod, wxString& aPath, wxString& aBody )
 {
     // Parse HTTP request line: "METHOD /path HTTP/1.1"
     int firstLineEnd = aRequest.Find( wxT( "\r\n" ) );
@@ -483,7 +478,7 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
     wxString firstLine = aRequest.Left( firstLineEnd );
     firstLine.Trim( false ).Trim( true ); // Trim whitespace
     wxArrayString parts = wxSplit( firstLine, wxT( ' ' ), wxT( '\0' ) );
-    
+
     if( parts.GetCount() < 2 )
         return false;
 
@@ -505,7 +500,7 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
     {
         bodyStart += 4; // Skip "\r\n\r\n"
     }
-    
+
     if( bodyStart != wxNOT_FOUND && static_cast<size_t>( bodyStart ) < aRequest.length() )
     {
         aBody = aRequest.Mid( static_cast<size_t>( bodyStart ) );
@@ -520,8 +515,8 @@ bool SCH_TOOL_HTTP_SERVER::ParseRequest( const wxString& aRequest, wxString& aMe
 }
 
 
-void SCH_TOOL_HTTP_SERVER::SendResponse( wxSocketBase* aSocket, int aStatusCode, 
-                                        const wxString& aContentType, const wxString& aBody )
+void SCH_TOOL_HTTP_SERVER::SendResponse( wxSocketBase* aSocket, int aStatusCode, const wxString& aContentType,
+                                         const wxString& aBody )
 {
     if( !aSocket || !aSocket->IsOk() )
         return;
@@ -529,28 +524,23 @@ void SCH_TOOL_HTTP_SERVER::SendResponse( wxSocketBase* aSocket, int aStatusCode,
     wxString statusText;
     switch( aStatusCode )
     {
-        case 200: statusText = wxT( "OK" ); break;
-        case 400: statusText = wxT( "Bad Request" ); break;
-        case 404: statusText = wxT( "Not Found" ); break;
-        case 500: statusText = wxT( "Internal Server Error" ); break;
-        default: statusText = wxT( "Unknown" ); break;
+    case 200: statusText = wxT( "OK" ); break;
+    case 400: statusText = wxT( "Bad Request" ); break;
+    case 404: statusText = wxT( "Not Found" ); break;
+    case 500: statusText = wxT( "Internal Server Error" ); break;
+    default: statusText = wxT( "Unknown" ); break;
     }
 
-    wxString response = wxString::Format( 
-        wxT( "HTTP/1.1 %d %s\r\n" )
-        wxT( "Content-Type: %s\r\n" )
-        wxT( "Access-Control-Allow-Origin: *\r\n" )
-        wxT( "Content-Length: %zu\r\n" )
-        wxT( "Connection: close\r\n" )
-        wxT( "\r\n" )
-        wxT( "%s" ),
-        aStatusCode, statusText, aContentType, aBody.length(), aBody );
+    wxString response = wxString::Format(
+            wxT( "HTTP/1.1 %d %s\r\n" ) wxT( "Content-Type: %s\r\n" ) wxT( "Access-Control-Allow-Origin: *\r\n" )
+                    wxT( "Content-Length: %zu\r\n" ) wxT( "Connection: close\r\n" ) wxT( "\r\n" ) wxT( "%s" ),
+            aStatusCode, statusText, aContentType, aBody.length(), aBody );
 
     // Write response in non-blocking mode
     aSocket->SetFlags( wxSOCKET_NOWAIT );
     wxScopedCharBuffer buffer = response.ToUTF8();
     aSocket->Write( buffer.data(), buffer.length() );
-    
+
     // Give it a moment to send, then close
     wxThread::Sleep( 10 );
 }
@@ -564,7 +554,7 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
         wxMutexLocker lock( m_mutex );
         tool = m_tool;
     }
-    
+
     if( !tool )
     {
         return CreateErrorResponse( wxT( "Tool instance not available" ), wxT( "TOOL_UNAVAILABLE" ) );
@@ -580,19 +570,17 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
         mappedToolName = wxT( "schematic.search_symbol" );
     }
     // Handle other tools that need schematic. prefix
-    else if( !mappedToolName.StartsWith( wxT( "schematic." ) ) && 
-             ( mappedToolName == wxT( "get_symbol_info" ) ||
-               mappedToolName == wxT( "place_component" ) ||
-               mappedToolName == wxT( "get_netlist" ) ||
-               mappedToolName == wxT( "get_sheet_info" ) ) )
+    else if( !mappedToolName.StartsWith( wxT( "schematic." ) )
+             && ( mappedToolName == wxT( "get_symbol_info" ) || mappedToolName == wxT( "place_component" )
+                  || mappedToolName == wxT( "get_netlist" ) || mappedToolName == wxT( "get_sheet_info" )
+                  || mappedToolName == wxT( "apply_patch" ) ) )
     {
         mappedToolName = wxT( "schematic." ) + mappedToolName;
     }
 
     // Map parameter names for tools that expect different parameter names
     // get_symbol_info and place_component expect "symbol" but requests send "symbol_id"
-    if( mappedToolName == wxT( "schematic.get_symbol_info" ) || 
-        mappedToolName == wxT( "schematic.place_component" ) )
+    if( mappedToolName == wxT( "schematic.get_symbol_info" ) || mappedToolName == wxT( "schematic.place_component" ) )
     {
         try
         {
@@ -600,8 +588,8 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
             if( args.is_object() )
             {
                 wxString symbolValue;
-                bool needsResolution = false;
-                
+                bool     needsResolution = false;
+
                 // Map symbol_id -> symbol
                 if( args.contains( "symbol_id" ) && !args.contains( "symbol" ) )
                 {
@@ -610,8 +598,8 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                     args.erase( "symbol_id" );
                 }
                 // Also handle lib_id -> symbol for get_symbol_info
-                else if( mappedToolName == wxT( "schematic.get_symbol_info" ) && 
-                         args.contains( "lib_id" ) && !args.contains( "symbol" ) )
+                else if( mappedToolName == wxT( "schematic.get_symbol_info" ) && args.contains( "lib_id" )
+                         && !args.contains( "symbol" ) )
                 {
                     symbolValue = wxString::FromUTF8( args["lib_id"].get<std::string>() );
                     args["symbol"] = args["lib_id"];
@@ -621,14 +609,14 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                 {
                     symbolValue = wxString::FromUTF8( args["symbol"].get<std::string>() );
                 }
-                
+
                 // Check if symbol needs library prefix resolution
                 // If it doesn't contain ":", try to resolve it using search_symbol
                 if( !symbolValue.IsEmpty() && !symbolValue.Contains( wxT( ":" ) ) )
                 {
                     needsResolution = true;
                 }
-                
+
                 // For get_symbol_info, resolve symbol if needed (place_component does this internally)
                 if( needsResolution && mappedToolName == wxT( "schematic.get_symbol_info" ) && tool )
                 {
@@ -636,7 +624,7 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                     json searchQuery = json::object();
                     searchQuery["query"] = symbolValue.ToStdString();
                     searchQuery["limit"] = 5; // Get more results to find best match
-                    
+
                     wxString searchArgs = wxString::FromUTF8( searchQuery.dump() );
                     if( tool->RunToolCommand( wxT( "schematic.search_symbol" ), searchArgs ) )
                     {
@@ -646,28 +634,29 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                             try
                             {
                                 json searchResultJson = json::parse( searchResult.ToStdString() );
-                                if( searchResultJson.contains( "matches" ) && 
-                                    searchResultJson["matches"].is_array() && 
-                                    !searchResultJson["matches"].empty() &&
-                                    searchResultJson["matches"][0].is_object() &&
-                                    searchResultJson["matches"][0].contains( "lib_id" ) &&
-                                    searchResultJson["matches"][0]["lib_id"].is_string() )
+                                if( searchResultJson.contains( "matches" ) && searchResultJson["matches"].is_array()
+                                    && !searchResultJson["matches"].empty()
+                                    && searchResultJson["matches"][0].is_object()
+                                    && searchResultJson["matches"][0].contains( "lib_id" )
+                                    && searchResultJson["matches"][0]["lib_id"].is_string() )
                                 {
-                                    std::string resolvedLibId = searchResultJson["matches"][0]["lib_id"].get<std::string>();
+                                    std::string resolvedLibId =
+                                            searchResultJson["matches"][0]["lib_id"].get<std::string>();
                                     args["symbol"] = resolvedLibId;
-                                    wxLogMessage( wxT( "[ToolServer] Resolved '%s' to '%s'" ), 
-                                                symbolValue, wxString::FromUTF8( resolvedLibId ) );
+                                    wxLogMessage( wxT( "[ToolServer] Resolved '%s' to '%s'" ), symbolValue,
+                                                  wxString::FromUTF8( resolvedLibId ) );
                                 }
                                 else
                                 {
                                     // No matches found - return helpful error
-                                    int matchCount = searchResultJson.value( "count", 0 );
-                                    wxString errorMsg = wxString::Format( 
-                                        wxT( "Symbol '%s' not found in libraries. " ), symbolValue );
+                                    int      matchCount = searchResultJson.value( "count", 0 );
+                                    wxString errorMsg = wxString::Format( wxT( "Symbol '%s' not found in libraries. " ),
+                                                                          symbolValue );
                                     if( matchCount == 0 )
                                     {
                                         errorMsg += wxT( "No matching symbols found. " );
-                                        errorMsg += wxT( "Make sure symbol libraries are loaded and try searching with a different query." );
+                                        errorMsg += wxT( "Make sure symbol libraries are loaded and try searching with "
+                                                         "a different query." );
                                     }
                                     return CreateErrorResponse( errorMsg, wxT( "SYMBOL_NOT_FOUND" ) );
                                 }
@@ -680,9 +669,10 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                         else
                         {
                             // Search returned empty - symbol not found
-                            wxString errorMsg = wxString::Format( 
-                                wxT( "Symbol '%s' not found. Use format 'libnick:symbol_name' (e.g., 'Device:R') or ensure symbol libraries are loaded." ), 
-                                symbolValue );
+                            wxString errorMsg = wxString::Format(
+                                    wxT( "Symbol '%s' not found. Use format 'libnick:symbol_name' (e.g., 'Device:R') "
+                                         "or ensure symbol libraries are loaded." ),
+                                    symbolValue );
                             return CreateErrorResponse( errorMsg, wxT( "SYMBOL_NOT_FOUND" ) );
                         }
                     }
@@ -690,13 +680,14 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                     {
                         // Search failed - return error with suggestion
                         wxString searchError = tool->GetLastToolError();
-                        wxString errorMsg = wxString::Format( 
-                            wxT( "Failed to resolve symbol '%s': %s. Use format 'libnick:symbol_name' (e.g., 'Device:R')." ), 
-                            symbolValue, searchError.IsEmpty() ? wxT( "Search failed" ) : searchError );
+                        wxString errorMsg = wxString::Format(
+                                wxT( "Failed to resolve symbol '%s': %s. Use format 'libnick:symbol_name' (e.g., "
+                                     "'Device:R')." ),
+                                symbolValue, searchError.IsEmpty() ? wxT( "Search failed" ) : searchError );
                         return CreateErrorResponse( errorMsg, wxT( "SYMBOL_RESOLUTION_FAILED" ) );
                     }
                 }
-                
+
                 mappedArgsJson = wxString::FromUTF8( args.dump() );
             }
         }
@@ -707,12 +698,10 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
     }
 
     // Check for unsupported tools
-    if( mappedToolName == wxT( "schematic.get_netlist" ) || 
-        mappedToolName == wxT( "schematic.get_sheet_info" ) )
+    if( mappedToolName == wxT( "schematic.get_netlist" ) || mappedToolName == wxT( "schematic.get_sheet_info" ) )
     {
-        return CreateErrorResponse( 
-            wxString::Format( wxT( "Tool '%s' is not yet implemented" ), mappedToolName ),
-            wxT( "TOOL_NOT_IMPLEMENTED" ) );
+        return CreateErrorResponse( wxString::Format( wxT( "Tool '%s' is not yet implemented" ), mappedToolName ),
+                                    wxT( "TOOL_NOT_IMPLEMENTED" ) );
     }
 
     // Execute tool command (tool pointer is still valid from above)
@@ -747,7 +736,7 @@ wxString SCH_TOOL_HTTP_SERVER::CreateErrorResponse( const wxString& aError, cons
     response["error"] = json::object();
     response["error"]["code"] = aCode.ToStdString();
     response["error"]["message"] = aError.ToStdString();
-    
+
     return wxString::FromUTF8( response.dump() );
 }
 
@@ -756,7 +745,7 @@ wxString SCH_TOOL_HTTP_SERVER::CreateSuccessResponse( const wxString& aResult )
 {
     json response;
     response["ok"] = true;
-    
+
     // Try to parse result as JSON, if it's already JSON, use it as result
     // Otherwise, wrap it in a string
     try
@@ -769,6 +758,6 @@ wxString SCH_TOOL_HTTP_SERVER::CreateSuccessResponse( const wxString& aResult )
         // If not valid JSON, treat as string
         response["result"] = aResult.ToStdString();
     }
-    
+
     return wxString::FromUTF8( response.dump() );
 }

@@ -49,11 +49,17 @@
 using json = nlohmann::json;
 #include <sch_commit.h>
 #include <lib_id.h>
+#include <sch_io/sch_io_mgr.h>
+#include <sch_sheet.h>
+#include <schematic.h>
+#include <wx/file.h>
+#include <wx/filename.h>
+#include <wx/utils.h>
 
 
 SCH_OLLAMA_AGENT_TOOL::SCH_OLLAMA_AGENT_TOOL() :
-    SCH_TOOL_BASE<SCH_EDIT_FRAME>( "eeschema.OllamaAgentTool" ),
-    m_model( wxS( "qwen3:4b" ) )  // Default model
+        SCH_TOOL_BASE<SCH_EDIT_FRAME>( "eeschema.OllamaAgentTool" ),
+        m_model( wxS( "qwen3:4b" ) ) // Default model
 {
 }
 
@@ -102,14 +108,14 @@ bool SCH_OLLAMA_AGENT_TOOL::Init()
 
     // Start HTTP server for tool API
     // Get port from environment variable or use default 54321
-    int port = 54321;
+    int      port = 54321;
     wxString portEnv;
     if( wxGetEnv( wxT( "KICAD_HTTP_TOOL_PORT" ), &portEnv ) && !portEnv.IsEmpty() )
     {
         long portLong;
         if( portEnv.ToLong( &portLong ) && portLong > 0 && portLong < 65536 )
         {
-            port = (int)portLong;
+            port = (int) portLong;
         }
     }
 
@@ -135,9 +141,8 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
     else
     {
         // Get request from user via simple dialog
-        WX_TEXT_ENTRY_DIALOG dlg( m_frame, _( "Ollama Agent Request" ),
-                                  _( "Enter your request:" ), wxEmptyString );
-        
+        WX_TEXT_ENTRY_DIALOG dlg( m_frame, _( "Ollama Agent Request" ), _( "Enter your request:" ), wxEmptyString );
+
         if( dlg.ShowModal() != wxID_OK )
             return 0;
 
@@ -156,7 +161,8 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
         }
         catch( ... )
         {
-            DisplayError( m_frame, _( "Failed to initialize Python agent client. Please check your network configuration." ) );
+            DisplayError( m_frame,
+                          _( "Failed to initialize Python agent client. Please check your network configuration." ) );
             return 0;
         }
     }
@@ -179,7 +185,7 @@ int SCH_OLLAMA_AGENT_TOOL::ProcessRequest( const TOOL_EVENT& aEvent )
     if( !ParseAndExecute( response ) )
     {
         DisplayInfoMessage( m_frame, _( "Agent response received but could not parse commands." ),
-                           _( "Ollama Agent" ) );
+                            _( "Ollama Agent" ) );
     }
 
     return 0;
@@ -227,23 +233,19 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
     content << wxS( "Sheet: " ) << m_frame->GetFullScreenDesc() << wxS( "\n\n" );
 
     // Collect items by type for organized output
-    std::vector<SCH_SYMBOL*> symbols;
-    std::vector<SCH_JUNCTION*> junctions;
-    std::vector<SCH_LINE*> wires;
-    std::vector<SCH_LABEL*> labels;
+    std::vector<SCH_SYMBOL*>      symbols;
+    std::vector<SCH_JUNCTION*>    junctions;
+    std::vector<SCH_LINE*>        wires;
+    std::vector<SCH_LABEL*>       labels;
     std::vector<SCH_GLOBALLABEL*> globalLabels;
-    std::vector<SCH_TEXT*> texts;
+    std::vector<SCH_TEXT*>        texts;
 
     for( SCH_ITEM* item : screen->Items() )
     {
         switch( item->Type() )
         {
-        case SCH_SYMBOL_T:
-            symbols.push_back( static_cast<SCH_SYMBOL*>( item ) );
-            break;
-        case SCH_JUNCTION_T:
-            junctions.push_back( static_cast<SCH_JUNCTION*>( item ) );
-            break;
+        case SCH_SYMBOL_T: symbols.push_back( static_cast<SCH_SYMBOL*>( item ) ); break;
+        case SCH_JUNCTION_T: junctions.push_back( static_cast<SCH_JUNCTION*>( item ) ); break;
         case SCH_LINE_T:
         {
             SCH_LINE* line = static_cast<SCH_LINE*>( item );
@@ -251,17 +253,10 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
                 wires.push_back( line );
             break;
         }
-        case SCH_LABEL_T:
-            labels.push_back( static_cast<SCH_LABEL*>( item ) );
-            break;
-        case SCH_GLOBAL_LABEL_T:
-            globalLabels.push_back( static_cast<SCH_GLOBALLABEL*>( item ) );
-            break;
-        case SCH_TEXT_T:
-            texts.push_back( static_cast<SCH_TEXT*>( item ) );
-            break;
-        default:
-            break;
+        case SCH_LABEL_T: labels.push_back( static_cast<SCH_LABEL*>( item ) ); break;
+        case SCH_GLOBAL_LABEL_T: globalLabels.push_back( static_cast<SCH_GLOBALLABEL*>( item ) ); break;
+        case SCH_TEXT_T: texts.push_back( static_cast<SCH_TEXT*>( item ) ); break;
+        default: break;
         }
     }
 
@@ -272,42 +267,42 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         for( SCH_SYMBOL* symbol : symbols )
         {
             VECTOR2I pos = symbol->GetPosition();
-            double x_mm = schIUScale.IUTomm( pos.x );
-            double y_mm = schIUScale.IUTomm( pos.y );
-            
+            double   x_mm = schIUScale.IUTomm( pos.x );
+            double   y_mm = schIUScale.IUTomm( pos.y );
+
             wxString ref = symbol->GetRef( &sheet, true );
             wxString libId = symbol->GetLibId().Format();
-            int unit = symbol->GetUnit();
-            int bodyStyle = symbol->GetBodyStyle();
-            
-            BOX2I bbox = symbol->GetBoundingBox();
+            int      unit = symbol->GetUnit();
+            int      bodyStyle = symbol->GetBodyStyle();
+
+            BOX2I  bbox = symbol->GetBoundingBox();
             double bxmin = schIUScale.IUTomm( bbox.GetX() );
             double bymin = schIUScale.IUTomm( bbox.GetY() );
             double bxmax = schIUScale.IUTomm( bbox.GetRight() );
             double bymax = schIUScale.IUTomm( bbox.GetBottom() );
             double width = bxmax - bxmin;
             double height = bymax - bymin;
-            
-            content << wxString::Format( wxS( "  - Component %s (%s) at (%.2f, %.2f) mm, size=(%.2f, %.2f)mm\n" ),
-                                        ref, libId, x_mm, y_mm, width, height );
-            
+
+            content << wxString::Format( wxS( "  - Component %s (%s) at (%.2f, %.2f) mm, size=(%.2f, %.2f)mm\n" ), ref,
+                                         libId, x_mm, y_mm, width, height );
+
             if( unit > 1 || bodyStyle > 1 )
             {
                 content << wxString::Format( wxS( "    Unit: %d, Body Style: %d\n" ), unit, bodyStyle );
             }
-            
+
             // Get fields (value, footprint, etc.)
             SCH_FIELDS fields = symbol->GetFields();
-            bool hasFields = false;
+            bool       hasFields = false;
             for( const SCH_FIELD& field : fields )
             {
                 if( field.GetText().IsEmpty() )
                     continue;
-                    
+
                 wxString fieldName = field.GetName();
                 if( fieldName.IsEmpty() )
                     fieldName = wxS( "Value" ); // Default field name
-                    
+
                 if( !hasFields )
                 {
                     content << wxS( "    Fields:\n" );
@@ -315,7 +310,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
                 }
                 content << wxString::Format( wxS( "      %s: %s\n" ), fieldName, field.GetText() );
             }
-            
+
             // Get pins with their positions and net connections
             std::vector<SCH_PIN*> pins = symbol->GetPins( &sheet );
             if( !pins.empty() )
@@ -324,11 +319,11 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
                 for( SCH_PIN* pin : pins )
                 {
                     VECTOR2I pinPos = pin->GetPosition();
-                    double pinX_mm = schIUScale.IUTomm( pinPos.x );
-                    double pinY_mm = schIUScale.IUTomm( pinPos.y );
+                    double   pinX_mm = schIUScale.IUTomm( pinPos.x );
+                    double   pinY_mm = schIUScale.IUTomm( pinPos.y );
                     wxString pinName = pin->GetShownName();
                     wxString pinNumber = pin->GetShownNumber();
-                    
+
                     // Get net connection if available
                     wxString netName = wxS( "<unconnected>" );
                     if( SCH_CONNECTION* conn = pin->Connection( &sheet ) )
@@ -337,9 +332,9 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
                         if( netName.IsEmpty() )
                             netName = wxS( "<unnamed net>" );
                     }
-                    
-                    content << wxString::Format( wxS( "      Pin %s (%s) at (%.2f, %.2f) mm -> Net: %s\n" ),
-                                                pinName, pinNumber, pinX_mm, pinY_mm, netName );
+
+                    content << wxString::Format( wxS( "      Pin %s (%s) at (%.2f, %.2f) mm -> Net: %s\n" ), pinName,
+                                                 pinNumber, pinX_mm, pinY_mm, netName );
                 }
             }
             content << wxS( "\n" );
@@ -354,20 +349,20 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         for( SCH_JUNCTION* junction : junctions )
         {
             VECTOR2I pos = junction->GetPosition();
-            double x_mm = schIUScale.IUTomm( pos.x );
-            double y_mm = schIUScale.IUTomm( pos.y );
-            
+            double   x_mm = schIUScale.IUTomm( pos.x );
+            double   y_mm = schIUScale.IUTomm( pos.y );
+
             // Get net name if available
             wxString netName = wxS( "" );
             if( SCH_CONNECTION* conn = junction->Connection( &sheet ) )
             {
                 netName = conn->Name();
             }
-            
+
             if( !netName.IsEmpty() )
             {
-                content << wxString::Format( wxS( "  - Junction at (%.2f, %.2f) mm on net: %s\n" ),
-                                            x_mm, y_mm, netName );
+                content << wxString::Format( wxS( "  - Junction at (%.2f, %.2f) mm on net: %s\n" ), x_mm, y_mm,
+                                             netName );
             }
             else
             {
@@ -385,27 +380,27 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         {
             VECTOR2I start = wire->GetStartPoint();
             VECTOR2I end = wire->GetEndPoint();
-            double x1_mm = schIUScale.IUTomm( start.x );
-            double y1_mm = schIUScale.IUTomm( start.y );
-            double x2_mm = schIUScale.IUTomm( end.x );
-            double y2_mm = schIUScale.IUTomm( end.y );
-            
+            double   x1_mm = schIUScale.IUTomm( start.x );
+            double   y1_mm = schIUScale.IUTomm( start.y );
+            double   x2_mm = schIUScale.IUTomm( end.x );
+            double   y2_mm = schIUScale.IUTomm( end.y );
+
             // Get net name if available
             wxString netName = wxS( "" );
             if( SCH_CONNECTION* conn = wire->Connection( &sheet ) )
             {
                 netName = conn->Name();
             }
-            
+
             if( !netName.IsEmpty() )
             {
-                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm on net: %s\n" ),
-                                            x1_mm, y1_mm, x2_mm, y2_mm, netName );
+                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm on net: %s\n" ), x1_mm,
+                                             y1_mm, x2_mm, y2_mm, netName );
             }
             else
             {
-                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm\n" ),
-                                            x1_mm, y1_mm, x2_mm, y2_mm );
+                content << wxString::Format( wxS( "  - Wire from (%.2f, %.2f) to (%.2f, %.2f) mm\n" ), x1_mm, y1_mm,
+                                             x2_mm, y2_mm );
             }
         }
         content << wxS( "\n" );
@@ -418,26 +413,25 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         for( SCH_LABEL* label : labels )
         {
             VECTOR2I pos = label->GetPosition();
-            double x_mm = schIUScale.IUTomm( pos.x );
-            double y_mm = schIUScale.IUTomm( pos.y );
+            double   x_mm = schIUScale.IUTomm( pos.x );
+            double   y_mm = schIUScale.IUTomm( pos.y );
             wxString labelText = label->GetText();
-            
+
             // Get net name if available
             wxString netName = wxS( "" );
             if( SCH_CONNECTION* conn = label->Connection( &sheet ) )
             {
                 netName = conn->Name();
             }
-            
+
             if( !netName.IsEmpty() && netName != labelText )
             {
-                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ),
-                                            labelText, x_mm, y_mm, netName );
+                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ), labelText, x_mm,
+                                             y_mm, netName );
             }
             else
             {
-                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm\n" ),
-                                            labelText, x_mm, y_mm );
+                content << wxString::Format( wxS( "  - Label \"%s\" at (%.2f, %.2f) mm\n" ), labelText, x_mm, y_mm );
             }
         }
         content << wxS( "\n" );
@@ -450,8 +444,8 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         for( SCH_GLOBALLABEL* label : globalLabels )
         {
             VECTOR2I pos = label->GetPosition();
-            double x_mm = schIUScale.IUTomm( pos.x );
-            double y_mm = schIUScale.IUTomm( pos.y );
+            double   x_mm = schIUScale.IUTomm( pos.x );
+            double   y_mm = schIUScale.IUTomm( pos.y );
             wxString labelText = label->GetText();
 
             wxString netName = wxS( "" );
@@ -460,13 +454,13 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
 
             if( !netName.IsEmpty() && netName != labelText )
             {
-                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ),
-                                             labelText, x_mm, y_mm, netName );
+                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm (net: %s)\n" ), labelText,
+                                             x_mm, y_mm, netName );
             }
             else
             {
-                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm\n" ),
-                                             labelText, x_mm, y_mm );
+                content << wxString::Format( wxS( "  - Global Label \"%s\" at (%.2f, %.2f) mm\n" ), labelText, x_mm,
+                                             y_mm );
             }
         }
 
@@ -480,16 +474,16 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetCurrentSchematicContent()
         for( SCH_TEXT* text : texts )
         {
             VECTOR2I pos = text->GetPosition();
-            double x_mm = schIUScale.IUTomm( pos.x );
-            double y_mm = schIUScale.IUTomm( pos.y );
+            double   x_mm = schIUScale.IUTomm( pos.x );
+            double   y_mm = schIUScale.IUTomm( pos.y );
             wxString textContent = text->GetText();
-            content << wxString::Format( wxS( "  - Text \"%s\" at (%.2f, %.2f) mm\n" ),
-                                        textContent, x_mm, y_mm );
+            content << wxString::Format( wxS( "  - Text \"%s\" at (%.2f, %.2f) mm\n" ), textContent, x_mm, y_mm );
         }
         content << wxS( "\n" );
     }
 
-    if( symbols.empty() && junctions.empty() && wires.empty() && labels.empty() && globalLabels.empty() && texts.empty() )
+    if( symbols.empty() && junctions.empty() && wires.empty() && labels.empty() && globalLabels.empty()
+        && texts.empty() )
     {
         content << wxS( "  (Schematic is empty)\n" );
     }
@@ -502,7 +496,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
     if( !m_frame )
         return wxEmptyString;
 
-    SCHEMATIC& schematic = m_frame->Schematic();
+    SCHEMATIC&     schematic = m_frame->Schematic();
     SCH_SHEET_LIST sheets = schematic.Hierarchy();
     sheets.SortByPageNumbers();
 
@@ -539,9 +533,9 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
             wxString ref = symbol->GetRef( &sheetPath, true );
             wxString libId = symbol->GetLibId().Format();
             VECTOR2I symPos = symbol->GetPosition();
-            double sx = schIUScale.IUTomm( symPos.x );
-            double sy = schIUScale.IUTomm( symPos.y );
-            int orientProp = static_cast<int>( symbol->GetOrientationProp() ); // 0/90/180/270
+            double   sx = schIUScale.IUTomm( symPos.x );
+            double   sy = schIUScale.IUTomm( symPos.y );
+            int      orientProp = static_cast<int>( symbol->GetOrientationProp() ); // 0/90/180/270
 
             wxString value;
             wxString footprint;
@@ -565,7 +559,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
                     datasheet = field.GetText();
             }
 
-            BOX2I bbox = symbol->GetBoundingBox();
+            BOX2I  bbox = symbol->GetBoundingBox();
             double bxmin = schIUScale.IUTomm( bbox.GetX() );
             double bymin = schIUScale.IUTomm( bbox.GetY() );
             double bxmax = schIUScale.IUTomm( bbox.GetRight() );
@@ -573,8 +567,10 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
             double width = bxmax - bxmin;
             double height = bymax - bymin;
 
-            out << wxString::Format( wxS( " - %s (%s) value=%s footprint=%s datasheet=%s pos=(%.2f, %.2f) rot=%d size=(%.2f, %.2f)mm bbox=(%.2f, %.2f, %.2f, %.2f)\n" ),
-                                     ref, libId, value, footprint, datasheet, sx, sy, orientProp, width, height, bxmin, bymin, bxmax, bymax );
+            out << wxString::Format( wxS( " - %s (%s) value=%s footprint=%s datasheet=%s pos=(%.2f, %.2f) rot=%d "
+                                          "size=(%.2f, %.2f)mm bbox=(%.2f, %.2f, %.2f, %.2f)\n" ),
+                                     ref, libId, value, footprint, datasheet, sx, sy, orientProp, width, height, bxmin,
+                                     bymin, bxmax, bymax );
 
             std::vector<SCH_PIN*> pins = symbol->GetPins( &sheetPath );
             for( SCH_PIN* pin : pins )
@@ -585,18 +581,17 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
                 wxString pinNumber = pin->GetShownNumber();
                 wxString pinName = pin->GetShownName();
                 VECTOR2I pinPos = pin->GetPosition();
-                double px = schIUScale.IUTomm( pinPos.x );
-                double py = schIUScale.IUTomm( pinPos.y );
+                double   px = schIUScale.IUTomm( pinPos.x );
+                double   py = schIUScale.IUTomm( pinPos.y );
 
                 wxString pinOrient = wxS( "UNKNOWN" );
                 switch( pin->GetOrientation() )
                 {
-                default:
-                    break;
+                default: break;
                 case PIN_ORIENTATION::PIN_RIGHT: pinOrient = wxS( "RIGHT" ); break;
-                case PIN_ORIENTATION::PIN_LEFT:  pinOrient = wxS( "LEFT" ); break;
-                case PIN_ORIENTATION::PIN_UP:    pinOrient = wxS( "UP" ); break;
-                case PIN_ORIENTATION::PIN_DOWN:  pinOrient = wxS( "DOWN" ); break;
+                case PIN_ORIENTATION::PIN_LEFT: pinOrient = wxS( "LEFT" ); break;
+                case PIN_ORIENTATION::PIN_UP: pinOrient = wxS( "UP" ); break;
+                case PIN_ORIENTATION::PIN_DOWN: pinOrient = wxS( "DOWN" ); break;
                 }
 
                 wxString netName = wxS( "<unconnected>" );
@@ -631,7 +626,7 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
     out << wxS( "=== NETS (from pin connections) ===\n" );
     for( const auto& kv : netToNodes )
     {
-        const wxString& netName = kv.first;
+        const wxString&              netName = kv.first;
         const std::vector<wxString>& nodes = kv.second;
 
         out << wxS( "* " ) << netName << wxS( ": " );
@@ -654,20 +649,18 @@ wxString SCH_OLLAMA_AGENT_TOOL::GetFullSchematicContext( size_t aMaxChars )
 }
 
 
-
-
 bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 {
     bool success = false;
     m_agent->BeginBatch();
 
-    wxStringTokenizer tokenizer( aResponse, wxS( "\n" ) );
+    wxStringTokenizer     tokenizer( aResponse, wxS( "\n" ) );
     std::set<std::string> unknownToolsLogged;
-    
+
     while( tokenizer.HasMoreTokens() )
     {
         wxString line = tokenizer.GetNextToken().Trim();
-        
+
         if( line.IsEmpty() || line.StartsWith( wxS( "#" ) ) )
             continue;
 
@@ -697,17 +690,13 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 
             // Bug fix: Updated to include all tools that ExecuteToolCommand actually handles
             bool supportedTool =
-                    lowerTool == wxS( "schematic.place_component" )
-                    || lowerTool == wxS( "schematic.move_component" )
-                    || lowerTool == wxS( "schematic.add_wire" )
-                    || lowerTool == wxS( "schematic.add_net_label" )
-                    || lowerTool == wxS( "schematic.add_global_label" )
-                    || lowerTool == wxS( "schematic.add_label" )
+                    lowerTool == wxS( "schematic.place_component" ) || lowerTool == wxS( "schematic.move_component" )
+                    || lowerTool == wxS( "schematic.add_wire" ) || lowerTool == wxS( "schematic.add_net_label" )
+                    || lowerTool == wxS( "schematic.add_global_label" ) || lowerTool == wxS( "schematic.add_label" )
                     || lowerTool == wxS( "schematic.connect_with_net_label" )
                     || lowerTool == wxS( "schematic.connect_with_global_label" )
-                    || lowerTool == wxS( "schematic.get_datasheet" )
-            || lowerTool == wxS( "schematic.get_symbol_info" )
-                    || lowerTool == wxS( "schematic.search_symbol" )
+                    || lowerTool == wxS( "schematic.get_datasheet" ) || lowerTool == wxS( "schematic.get_symbol_info" )
+                    || lowerTool == wxS( "schematic.search_symbol" ) || lowerTool == wxS( "schematic.apply_patch" )
                     || lowerTool == wxS( "mock.selection_inspector" );
 
             if( !supportedTool )
@@ -716,8 +705,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 
                 if( unknownToolsLogged.insert( normalizedTool ).second )
                 {
-                    wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ),
-                                  toolName.wx_str() );
+                    wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), toolName.wx_str() );
                 }
 
                 continue;
@@ -762,7 +750,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
         // Parse LABEL command
         else if( upperLine.StartsWith( wxS( "LABEL" ) ) )
         {
-            double x, y;
+            double   x, y;
             wxString text;
             if( wxSscanf( line, wxS( "LABEL %lf %lf" ), &x, &y ) == 2 )
             {
@@ -793,7 +781,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
         // Parse TEXT command
         else if( upperLine.StartsWith( wxS( "TEXT" ) ) )
         {
-            double x, y;
+            double   x, y;
             wxString text;
             if( wxSscanf( line, wxS( "TEXT %lf %lf" ), &x, &y ) == 2 )
             {
@@ -826,8 +814,6 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 }
 
 
-
-
 bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload )
 {
     m_lastToolError.clear();
@@ -835,8 +821,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
 
     if( aToolName.CmpNoCase( wxS( "mock.selection_inspector" ) ) == 0 )
     {
-        wxLogMessage( wxS( "[OllamaAgent] mock tool '%s' invoked with payload: %s" ),
-                      aToolName.wx_str(), aPayload.wx_str() );
+        wxLogMessage( wxS( "[OllamaAgent] mock tool '%s' invoked with payload: %s" ), aToolName.wx_str(),
+                      aPayload.wx_str() );
         return true;
     }
 
@@ -881,8 +867,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            m_lastToolError = wxString::Format( _( "add_label payload parse error: %s" ),
-                                                wxString::FromUTF8( e.what() ) );
+            m_lastToolError =
+                    wxString::Format( _( "add_label payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
@@ -914,8 +900,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            m_lastToolError = wxString::Format( _( "get_datasheet payload parse error: %s" ),
-                                                wxString::FromUTF8( e.what() ) );
+            m_lastToolError =
+                    wxString::Format( _( "get_datasheet payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
@@ -930,8 +916,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            m_lastToolError = wxString::Format( _( "search_symbol payload parse error: %s" ),
-                                                wxString::FromUTF8( e.what() ) );
+            m_lastToolError =
+                    wxString::Format( _( "search_symbol payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
@@ -946,8 +932,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            m_lastToolError = wxString::Format( _( "get_symbol_info payload parse error: %s" ),
-                                                wxString::FromUTF8( e.what() ) );
+            m_lastToolError =
+                    wxString::Format( _( "get_symbol_info payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
@@ -962,8 +948,23 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
         catch( const json::exception& e )
         {
-            wxLogWarning( wxS( "[OllamaAgent] add_wire payload parse error: %s" ),
-                          wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] add_wire payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.apply_patch" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleApplyPatchTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError =
+                    wxString::Format( _( "apply_patch payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
     }
@@ -996,8 +997,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleGetDatasheetTool( const json& aPayload )
         return false;
     }
 
-    SYMBOL_MATCH match = findSymbolByRefOrValue( reference );
-    SCH_SYMBOL* found = match.symbol;
+    SYMBOL_MATCH   match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL*    found = match.symbol;
     SCH_SHEET_PATH foundSheet = match.sheet;
 
     if( !found )
@@ -1104,7 +1105,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
     auto splitWords = []( const wxString& text ) -> std::vector<wxString>
     {
         std::vector<wxString> words;
-        wxStringTokenizer tokenizer( text.Lower(), wxS( " \t\n\r,;:-_./" ), wxTOKEN_STRTOK );
+        wxStringTokenizer     tokenizer( text.Lower(), wxS( " \t\n\r,;:-_./" ), wxTOKEN_STRTOK );
         while( tokenizer.HasMoreTokens() )
         {
             wxString word = tokenizer.GetNextToken();
@@ -1129,7 +1130,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
 
     struct MATCH
     {
-        int score = 0;
+        int      score = 0;
         wxString lib;
         wxString name;
     };
@@ -1185,7 +1186,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
 
                 wxString tLower = text.Lower();
                 wxString tNorm = normalize( text );
-                int s = 0;
+                int      s = 0;
 
                 // Exact match
                 if( tLower == qLower )
@@ -1213,7 +1214,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSearchSymbolTool( const json& aPayload )
                     {
                         if( word.length() < 2 )
                             continue;
-                        if( tLower.Find( word ) != wxNOT_FOUND || normalize( tLower ).Find( normalize( word ) ) != wxNOT_FOUND )
+                        if( tLower.Find( word ) != wxNOT_FOUND
+                            || normalize( tLower ).Find( normalize( word ) ) != wxNOT_FOUND )
                             wordMatches++;
                     }
                     if( wordMatches > 0 )
@@ -1307,7 +1309,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleGetSymbolInfoTool( const json& aPayload )
     }
 
     LIB_ID libId;
-    UTF8 utfSymbol( symbolId.ToStdString().c_str() );
+    UTF8   utfSymbol( symbolId.ToStdString().c_str() );
 
     if( libId.Parse( utfSymbol ) >= 0 || !libId.IsValid() )
     {
@@ -1338,7 +1340,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleGetSymbolInfoTool( const json& aPayload )
     out["datasheet"] = docFile.ToStdString();
 
     // Provide pin count summary
-    json pins = json::array();
+    json                        pins = json::array();
     const std::vector<SCH_PIN*> pinList = libSymbol->GetPins();
     for( const SCH_PIN* p : pinList )
     {
@@ -1404,8 +1406,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
                     resolved.Trim( true ).Trim( false );
                     if( !resolved.IsEmpty() && resolved.Contains( wxS( ":" ) ) )
                     {
-                        wxLogMessage( wxS( "[OllamaAgent] Resolved symbol \"%s\" -> \"%s\"" ),
-                                      symbolId.wx_str(), resolved.wx_str() );
+                        wxLogMessage( wxS( "[OllamaAgent] Resolved symbol \"%s\" -> \"%s\"" ), symbolId.wx_str(),
+                                      resolved.wx_str() );
                         symbolId = resolved;
                     }
                 }
@@ -1418,7 +1420,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     }
 
     LIB_ID libId;
-    UTF8 utfSymbol( symbolId.ToStdString().c_str() );
+    UTF8   utfSymbol( symbolId.ToStdString().c_str() );
 
     if( libId.Parse( utfSymbol ) >= 0 || !libId.IsValid() )
     {
@@ -1457,28 +1459,26 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
         {
         }
 
-        m_lastToolError = wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ),
-                                            symbolId )
-                          + hint;
+        m_lastToolError =
+                wxString::Format( _( "Symbol \"%s\" not found in the current library tables." ), symbolId ) + hint;
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
     double xMm = aPayload.value( "x", 0.0 );
     double yMm = aPayload.value( "y", 0.0 );
-    int unit = aPayload.value( "unit", 1 );
-    int bodyStyle = aPayload.value( "body_style", 1 );
+    int    unit = aPayload.value( "unit", 1 );
+    int    bodyStyle = aPayload.value( "body_style", 1 );
     double rotation = aPayload.value( "rotation", 0.0 );
 
-    VECTOR2I pos( schIUScale.mmToIU( xMm ), schIUScale.mmToIU( yMm ) );
+    VECTOR2I        pos( schIUScale.mmToIU( xMm ), schIUScale.mmToIU( yMm ) );
     SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
-    SCH_SCREEN* screen = sheet.LastScreen();
+    SCH_SCREEN*     screen = sheet.LastScreen();
 
     if( !screen )
         return false;
 
-    SCH_SYMBOL* newSymbol =
-            new SCH_SYMBOL( *libSymbol, libId, &sheet, unit, bodyStyle, pos, &m_frame->Schematic() );
+    SCH_SYMBOL* newSymbol = new SCH_SYMBOL( *libSymbol, libId, &sheet, unit, bodyStyle, pos, &m_frame->Schematic() );
 
     newSymbol->SetPosition( pos );
 
@@ -1527,9 +1527,9 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     // Avoid overlapping existing symbols/text by nudging the placement to the nearest free location.
     // This makes tool-driven placement robust even if the model provides naive coordinates.
     {
-        const int stepIU = schIUScale.mmToIU( 5.08 );      // 0.2" grid-ish
-        const int marginIU = schIUScale.mmToIU( 1.0 );     // keep a small clearance
-        const int maxRadius = 30;                          // search radius in steps (~150mm)
+        const int stepIU = schIUScale.mmToIU( 5.08 );  // 0.2" grid-ish
+        const int marginIU = schIUScale.mmToIU( 1.0 ); // keep a small clearance
+        const int maxRadius = 30;                      // search radius in steps (~150mm)
 
         auto overlapsExisting = [&]( const BOX2I& aBox ) -> bool
         {
@@ -1557,8 +1557,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
         };
 
         const VECTOR2I basePos = newSymbol->GetPosition();
-        VECTOR2I chosenPos = basePos;
-        bool found = false;
+        VECTOR2I       chosenPos = basePos;
+        bool           found = false;
 
         // Quick check at the requested position first.
         if( !overlapsExisting( newSymbol->GetBoundingBox() ) )
@@ -1597,35 +1597,36 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 
     // Store reference before deferring UI operations
     wxString ref = newSymbol->GetRef( &sheet, false );
-    
+
     // Defer all UI operations to the main thread (required on macOS)
-    m_frame->CallAfter( [this, newSymbol, screen, ref, symbolId]()
-                        {
-                            SCH_COMMIT commit( m_frame );
-                            // Ensure the symbol is permanently added to the screen and view.
-                            m_frame->AddToScreen( newSymbol, screen );
-                            commit.Added( newSymbol, screen );
-                            commit.Push( _( "Place component" ) );
-                            
-                            // Ensure the canvas refreshes so the new component is visible immediately.
-                            if( m_frame->GetCanvas() )
-                            {
-                                if( auto view = m_frame->GetCanvas()->GetView() )
-                                {
-                                    view->Update( newSymbol );
-                                }
+    m_frame->CallAfter(
+            [this, newSymbol, screen, ref, symbolId]()
+            {
+                SCH_COMMIT commit( m_frame );
+                // Ensure the symbol is permanently added to the screen and view.
+                m_frame->AddToScreen( newSymbol, screen );
+                commit.Added( newSymbol, screen );
+                commit.Push( _( "Place component" ) );
 
-                                m_frame->GetCanvas()->Refresh();
-                            }
+                // Ensure the canvas refreshes so the new component is visible immediately.
+                if( m_frame->GetCanvas() )
+                {
+                    if( auto view = m_frame->GetCanvas()->GetView() )
+                    {
+                        view->Update( newSymbol );
+                    }
 
-                            m_frame->OnModify();
+                    m_frame->GetCanvas()->Refresh();
+                }
 
-                            if( m_frame->GetToolManager() )
-                            {
-                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
-                            }
-                        } );
-    
+                m_frame->OnModify();
+
+                if( m_frame->GetToolManager() )
+                {
+                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
+                }
+            } );
+
     // Return the assigned reference so the agent can use it for labels/wiring.
     // Note: UI operations are deferred, but the symbol is already added to the screen above
     json res = json::object();
@@ -1637,11 +1638,11 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
 }
 
 
-SCH_OLLAMA_AGENT_TOOL::SYMBOL_MATCH SCH_OLLAMA_AGENT_TOOL::findSymbolByRefOrValue(
-        const wxString& aIdentifier, bool aCurrentSheetOnly )
+SCH_OLLAMA_AGENT_TOOL::SYMBOL_MATCH SCH_OLLAMA_AGENT_TOOL::findSymbolByRefOrValue( const wxString& aIdentifier,
+                                                                                   bool            aCurrentSheetOnly )
 {
     SYMBOL_MATCH bestMatch;
-    wxString id = aIdentifier;
+    wxString     id = aIdentifier;
     id.Trim( true ).Trim( false );
 
     if( id.IsEmpty() || !m_frame )
@@ -1707,8 +1708,8 @@ SCH_OLLAMA_AGENT_TOOL::SYMBOL_MATCH SCH_OLLAMA_AGENT_TOOL::findSymbolByRefOrValu
         for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
         {
             SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
-            wxString libId = sym->GetLibId().Format();
-            wxString itemName = wxString::FromUTF8( sym->GetLibId().GetLibItemName().c_str() );
+            wxString    libId = sym->GetLibId().Format();
+            wxString    itemName = wxString::FromUTF8( sym->GetLibId().GetLibItemName().c_str() );
             if( libId.CmpNoCase( id ) == 0 || itemName.CmpNoCase( id ) == 0 )
             {
                 bestMatch.symbol = sym;
@@ -1748,8 +1749,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
     reference.Trim( true ).Trim( false );
 
     // Find the symbol by reference (or value/symbol name as fallback)
-    SYMBOL_MATCH match = findSymbolByRefOrValue( reference );
-    SCH_SYMBOL* symbol = match.symbol;
+    SYMBOL_MATCH   match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL*    symbol = match.symbol;
     SCH_SHEET_PATH symbolSheet = match.sheet;
 
     if( !symbol )
@@ -1773,21 +1774,22 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleMoveComponentTool( const json& aPayload )
         return false;
 
     wxString commitMsg = wxString::Format( _( "Move component %s" ), reference );
-    m_frame->CallAfter( [this, symbol, screen, delta, commitMsg]()
-                        {
-                            SCH_COMMIT commit( m_frame );
-                            // Record old state before modification
-                            commit.Modify( symbol, screen );
-                            // Do the move
-                            symbol->Move( delta );
-                            // Push the commit (triggers UI refresh)
-                            commit.Push( commitMsg );
+    m_frame->CallAfter(
+            [this, symbol, screen, delta, commitMsg]()
+            {
+                SCH_COMMIT commit( m_frame );
+                // Record old state before modification
+                commit.Modify( symbol, screen );
+                // Do the move
+                symbol->Move( delta );
+                // Push the commit (triggers UI refresh)
+                commit.Push( commitMsg );
 
-                            if( m_frame->GetToolManager() )
-                            {
-                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, symbol );
-                            }
-                        } );
+                if( m_frame->GetToolManager() )
+                {
+                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, symbol );
+                }
+            } );
 
     return true;
 }
@@ -1839,10 +1841,10 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
     if( !targetScreen )
         return false;
 
-    VECTOR2I pos;
-    bool havePos = false;
-    bool pinMode = false;
-    VECTOR2I pinPos;
+    VECTOR2I   pos;
+    bool       havePos = false;
+    bool       pinMode = false;
+    VECTOR2I   pinPos;
     SPIN_STYLE spinStyle = SPIN_STYLE::RIGHT;
 
     // Mode A: coordinates (mm)
@@ -1884,13 +1886,14 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
 
         // Find the referenced symbol (or value/name) anywhere in the loaded hierarchy.
         SYMBOL_MATCH match = findSymbolByRefOrValue( ref );
-        SCH_SYMBOL* sym = match.symbol;
+        SCH_SYMBOL*  sym = match.symbol;
         targetSheet = match.sheet;
         targetScreen = targetSheet.LastScreen();
 
         if( !sym || !targetScreen )
         {
-            m_lastToolError = wxString::Format( _( "add_net_label: component \"%s\" not found in schematic hierarchy." ), ref );
+            m_lastToolError =
+                    wxString::Format( _( "add_net_label: component \"%s\" not found in schematic hierarchy." ), ref );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
@@ -1942,18 +1945,10 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
         switch( targetPin->GetOrientation() )
         {
         default:
-        case PIN_ORIENTATION::PIN_RIGHT:
-            spinStyle = SPIN_STYLE::LEFT;
-            break;
-        case PIN_ORIENTATION::PIN_LEFT:
-            spinStyle = SPIN_STYLE::RIGHT;
-            break;
-        case PIN_ORIENTATION::PIN_UP:
-            spinStyle = SPIN_STYLE::BOTTOM;
-            break;
-        case PIN_ORIENTATION::PIN_DOWN:
-            spinStyle = SPIN_STYLE::UP;
-            break;
+        case PIN_ORIENTATION::PIN_RIGHT: spinStyle = SPIN_STYLE::LEFT; break;
+        case PIN_ORIENTATION::PIN_LEFT: spinStyle = SPIN_STYLE::RIGHT; break;
+        case PIN_ORIENTATION::PIN_UP: spinStyle = SPIN_STYLE::BOTTOM; break;
+        case PIN_ORIENTATION::PIN_DOWN: spinStyle = SPIN_STYLE::UP; break;
         }
 
         havePos = true;
@@ -1998,37 +1993,39 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
 
     // Add to screen synchronously (data operation)
     m_frame->AddToScreen( label, targetScreen );
-    
+
     // Defer UI operations to the main thread (required on macOS)
     wxString commitMsg = isLocal ? _( "Add net label" ) : _( "Add global label" );
-    m_frame->CallAfter( [this, label, stub, targetScreen, commitMsg]()
-                        {
-                            SCH_COMMIT commit( m_frame );
-                            if( stub )
-                                commit.Added( stub, targetScreen );
-                            commit.Added( label, targetScreen );
-                            commit.Push( commitMsg );
+    m_frame->CallAfter(
+            [this, label, stub, targetScreen, commitMsg]()
+            {
+                SCH_COMMIT commit( m_frame );
+                if( stub )
+                    commit.Added( stub, targetScreen );
+                commit.Added( label, targetScreen );
+                commit.Push( commitMsg );
 
-                            if( m_frame->GetCanvas() )
-                            {
-                                if( auto view = m_frame->GetCanvas()->GetView() )
-                                {
-                                    if( stub ) view->Update( stub );
-                                    view->Update( label );
-                                }
+                if( m_frame->GetCanvas() )
+                {
+                    if( auto view = m_frame->GetCanvas()->GetView() )
+                    {
+                        if( stub )
+                            view->Update( stub );
+                        view->Update( label );
+                    }
 
-                                m_frame->GetCanvas()->Refresh();
-                            }
+                    m_frame->GetCanvas()->Refresh();
+                }
 
-                            m_frame->OnModify();
+                m_frame->OnModify();
 
-                            if( m_frame->GetToolManager() )
-                            {
-                                if( stub )
-                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
-                                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
-                            }
-                        } );
+                if( m_frame->GetToolManager() )
+                {
+                    if( stub )
+                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
+                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
+                }
+            } );
 
     return true;
 }
@@ -2056,7 +2053,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleConnectWithNetLabelTool( const json& aPayload 
             return &obj;
 
         // nested: {at:{reference,pin}}
-        if( obj.contains( "at" ) && obj["at"].is_object() && obj["at"].contains( "reference" ) && obj["at"].contains( "pin" ) )
+        if( obj.contains( "at" ) && obj["at"].is_object() && obj["at"].contains( "reference" )
+            && obj["at"].contains( "pin" ) )
             return &obj["at"];
 
         return nullptr;
@@ -2087,32 +2085,31 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleConnectWithNetLabelTool( const json& aPayload 
 
     if( !fromEp || !toEp )
     {
-        m_lastToolError =
-                _( "connect_with_net_label requires endpoints in one of these forms: "
-                   "from{reference,pin}/to{reference,pin}, "
-                   "from{at{reference,pin}}/to{at{reference,pin}}, "
-                   "a/b, or endpoints:[{reference,pin},{reference,pin}]." );
+        m_lastToolError = _( "connect_with_net_label requires endpoints in one of these forms: "
+                             "from{reference,pin}/to{reference,pin}, "
+                             "from{at{reference,pin}}/to{at{reference,pin}}, "
+                             "a/b, or endpoints:[{reference,pin},{reference,pin}]." );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
 
     // Reuse add_net_label implementation twice.
     const std::string net = aPayload["net"].get<std::string>();
-    json p1 = json::object();
+    json              p1 = json::object();
     p1["net"] = net;
     p1["at"] = json::object();
-    p1["at"]["reference"] = (*fromEp)["reference"];
-    p1["at"]["pin"] = (*fromEp)["pin"];
+    p1["at"]["reference"] = ( *fromEp )["reference"];
+    p1["at"]["pin"] = ( *fromEp )["pin"];
 
     json p2 = json::object();
     p2["net"] = net;
     p2["at"] = json::object();
-    p2["at"]["reference"] = (*toEp)["reference"];
-    p2["at"]["pin"] = (*toEp)["pin"];
+    p2["at"]["reference"] = ( *toEp )["reference"];
+    p2["at"]["pin"] = ( *toEp )["pin"];
 
-    bool ok1 = HandleAddNetLabelTool( p1 );
+    bool     ok1 = HandleAddNetLabelTool( p1 );
     wxString err1 = m_lastToolError;
-    bool ok2 = HandleAddNetLabelTool( p2 );
+    bool     ok2 = HandleAddNetLabelTool( p2 );
     wxString err2 = m_lastToolError;
 
     if( ok1 && ok2 )
@@ -2137,9 +2134,9 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
 
     struct PIN_LOC
     {
-        VECTOR2I pos;
+        VECTOR2I    pos;
         SCH_SCREEN* screen = nullptr;
-        BOX2I symbolBBox;
+        BOX2I       symbolBBox;
     };
 
     // Resolve pin locations on the CURRENT sheet only (keeps results visible; avoids cross-sheet surprises).
@@ -2154,7 +2151,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
             return std::nullopt;
 
         SYMBOL_MATCH match = findSymbolByRefOrValue( ref, true );
-        SCH_SYMBOL* sym = match.symbol;
+        SCH_SYMBOL*  sym = match.symbol;
         if( !sym )
             return std::nullopt;
 
@@ -2177,17 +2174,19 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         return std::nullopt;
     };
 
-    VECTOR2I start;
-    VECTOR2I end;
+    VECTOR2I    start;
+    VECTOR2I    end;
     SCH_SCREEN* targetScreen = nullptr;
-    bool pinMode = false;
-    PIN_LOC startLoc;
-    PIN_LOC endLoc;
+    bool        pinMode = false;
+    PIN_LOC     startLoc;
+    PIN_LOC     endLoc;
 
     // Mode A: explicit coordinates (mm)
-    if( aPayload.contains( "x1" ) && aPayload.contains( "y1" ) && aPayload.contains( "x2" ) && aPayload.contains( "y2" ) )
+    if( aPayload.contains( "x1" ) && aPayload.contains( "y1" ) && aPayload.contains( "x2" )
+        && aPayload.contains( "y2" ) )
     {
-        if( !aPayload["x1"].is_number() || !aPayload["y1"].is_number() || !aPayload["x2"].is_number() || !aPayload["y2"].is_number() )
+        if( !aPayload["x1"].is_number() || !aPayload["y1"].is_number() || !aPayload["x2"].is_number()
+            || !aPayload["y2"].is_number() )
         {
             m_lastToolError = _( "add_wire tool fields x1, y1, x2, y2 must be numbers (mm)." );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
@@ -2200,17 +2199,19 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         double y2Mm = aPayload["y2"].get<double>();
 
         start = VECTOR2I( schIUScale.mmToIU( x1Mm ), schIUScale.mmToIU( y1Mm ) );
-        end   = VECTOR2I( schIUScale.mmToIU( x2Mm ), schIUScale.mmToIU( y2Mm ) );
+        end = VECTOR2I( schIUScale.mmToIU( x2Mm ), schIUScale.mmToIU( y2Mm ) );
         targetScreen = m_frame->GetCurrentSheet().LastScreen();
     }
     // Mode B: pin-to-pin
-    else if( aPayload.contains( "from" ) && aPayload.contains( "to" ) && aPayload["from"].is_object() && aPayload["to"].is_object() )
+    else if( aPayload.contains( "from" ) && aPayload.contains( "to" ) && aPayload["from"].is_object()
+             && aPayload["to"].is_object() )
     {
         pinMode = true;
         const json& from = aPayload["from"];
         const json& to = aPayload["to"];
 
-        if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" ) || !to.contains( "pin" ) )
+        if( !from.contains( "reference" ) || !from.contains( "pin" ) || !to.contains( "reference" )
+            || !to.contains( "pin" ) )
         {
             m_lastToolError = _( "add_wire pin mode requires: from{reference,pin}, to{reference,pin}." );
             wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
@@ -2274,7 +2275,8 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
 
     if( start == end )
     {
-        m_lastToolError = _( "add_wire produced a zero-length segment (start == end). Check pin resolution (reference/pin names) on the current sheet." );
+        m_lastToolError = _( "add_wire produced a zero-length segment (start == end). Check pin resolution "
+                             "(reference/pin names) on the current sheet." );
         wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
         return false;
     }
@@ -2282,7 +2284,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     // Escape away from pins/symbol bodies so vertical/horizontal runs don't "touch all pins".
     // "Add one" extra grid step vs a minimal escape.
     const int gridStepIU = schIUScale.mmToIU( 2.54 );
-    const int escapeIU = gridStepIU * 2;                // 5.08mm away from pin
+    const int escapeIU = gridStepIU * 2;                   // 5.08mm away from pin
     const int obstacleMarginIU = schIUScale.mmToIU( 1.0 ); // keep away from objects
 
     auto escapeFromPin = [&]( const PIN_LOC& aLoc ) -> VECTOR2I
@@ -2308,14 +2310,15 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     };
 
     const VECTOR2I startEsc = pinMode ? escapeFromPin( startLoc ) : start;
-    const VECTOR2I endEsc   = pinMode ? escapeFromPin( endLoc ) : end;
+    const VECTOR2I endEsc = pinMode ? escapeFromPin( endLoc ) : end;
 
     // Optional: prefer net labels for long connections if net name is provided.
     wxString netName;
     if( aPayload.contains( "net" ) && aPayload["net"].is_string() )
         netName = wxString::FromUTF8( aPayload["net"].get<std::string>() );
 
-    long long manhattanIU = llabs( (long long) ( endEsc.x - startEsc.x ) ) + llabs( (long long) ( endEsc.y - startEsc.y ) );
+    long long manhattanIU =
+            llabs( (long long) ( endEsc.x - startEsc.x ) ) + llabs( (long long) ( endEsc.y - startEsc.y ) );
     const long long labelThresholdIU = schIUScale.mmToIU( 60.0 ); // ~60mm
 
     if( !netName.IsEmpty() && manhattanIU > labelThresholdIU )
@@ -2334,34 +2337,35 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         // Add to screen synchronously (data operation)
         m_frame->AddToScreen( l1, targetScreen );
         m_frame->AddToScreen( l2, targetScreen );
-        
+
         // Defer UI operations to the main thread
-        m_frame->CallAfter( [this, l1, l2, targetScreen]()
-                            {
-                                SCH_COMMIT commit( m_frame );
-                                commit.Added( l1, targetScreen );
-                                commit.Added( l2, targetScreen );
-                                commit.Push( _( "Add net labels" ) );
+        m_frame->CallAfter(
+                [this, l1, l2, targetScreen]()
+                {
+                    SCH_COMMIT commit( m_frame );
+                    commit.Added( l1, targetScreen );
+                    commit.Added( l2, targetScreen );
+                    commit.Push( _( "Add net labels" ) );
 
-                                if( m_frame->GetCanvas() )
-                                {
-                                    if( auto view = m_frame->GetCanvas()->GetView() )
-                                    {
-                                        view->Update( l1 );
-                                        view->Update( l2 );
-                                    }
+                    if( m_frame->GetCanvas() )
+                    {
+                        if( auto view = m_frame->GetCanvas()->GetView() )
+                        {
+                            view->Update( l1 );
+                            view->Update( l2 );
+                        }
 
-                                    m_frame->GetCanvas()->Refresh();
-                                }
+                        m_frame->GetCanvas()->Refresh();
+                    }
 
-                                m_frame->OnModify();
+                    m_frame->OnModify();
 
-                                if( m_frame->GetToolManager() )
-                                {
-                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
-                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
-                                }
-                            } );
+                    if( m_frame->GetToolManager() )
+                    {
+                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
+                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
+                    }
+                } );
 
         return true;
     }
@@ -2496,7 +2500,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         bends.push_back( VECTOR2I( startEsc.x + k * gridStepIU, endEsc.y ) );
     }
 
-    VECTOR2I bend = bends.front();
+    VECTOR2I  bend = bends.front();
     long long bestScore = std::numeric_limits<long long>::max();
 
     for( const VECTOR2I& b : bends )
@@ -2512,7 +2516,7 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         }
     }
 
-    SCH_COMMIT commit( m_frame );
+    SCH_COMMIT             commit( m_frame );
     std::vector<SCH_LINE*> newWires;
 
     auto addSegmentIfNeeded = [&]( const VECTOR2I& aA, const VECTOR2I& aB )
@@ -2551,33 +2555,335 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
     }
 
     // Defer UI operations to the main thread (commit.Push triggers OnModify which touches OpenGL)
-    m_frame->CallAfter( [this, newWires, targetScreen]()
-                        {
-                            SCH_COMMIT pushCommit( m_frame );
-                            // Re-add all wires to the commit for undo/redo
-                            for( SCH_LINE* w : newWires )
-                                pushCommit.Added( w, targetScreen );
-                            pushCommit.Push( _( "Add wire" ) );
+    m_frame->CallAfter(
+            [this, newWires, targetScreen]()
+            {
+                SCH_COMMIT pushCommit( m_frame );
+                // Re-add all wires to the commit for undo/redo
+                for( SCH_LINE* w : newWires )
+                    pushCommit.Added( w, targetScreen );
+                pushCommit.Push( _( "Add wire" ) );
 
-                            if( m_frame->GetCanvas() )
-                            {
-                                if( auto view = m_frame->GetCanvas()->GetView() )
-                                {
-                                    for( SCH_LINE* w : newWires )
-                                        view->Update( w );
-                                }
+                if( m_frame->GetCanvas() )
+                {
+                    if( auto view = m_frame->GetCanvas()->GetView() )
+                    {
+                        for( SCH_LINE* w : newWires )
+                            view->Update( w );
+                    }
 
-                                m_frame->GetCanvas()->Refresh();
-                            }
+                    m_frame->GetCanvas()->Refresh();
+                }
 
-                            m_frame->OnModify();
+                m_frame->OnModify();
 
-                            if( m_frame->GetToolManager() )
-                            {
-                                for( SCH_LINE* w : newWires )
-                                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
-                            }
-                        } );
+                if( m_frame->GetToolManager() )
+                {
+                    for( SCH_LINE* w : newWires )
+                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, w );
+                }
+            } );
+
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleApplyPatchTool( const json& aPayload )
+{
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting execution" ) );
+
+    if( !m_frame || !aPayload.is_object() )
+    {
+        m_lastToolError = _( "Invalid payload for apply_patch" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    if( !aPayload.contains( "patch" ) || !aPayload["patch"].is_string() )
+    {
+        m_lastToolError = _( "apply_patch requires 'patch' (string) parameter" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString patch = wxString::FromUTF8( aPayload["patch"].get<std::string>() );
+    wxString commitMessage = _( "Applied patch via AI agent" );
+
+    if( aPayload.contains( "commit_message" ) && aPayload["commit_message"].is_string() )
+    {
+        commitMessage = wxString::FromUTF8( aPayload["commit_message"].get<std::string>() );
+    }
+
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch length=%zu, commit_message='%s'" ), patch.length(),
+                  commitMessage );
+
+    // Get current schematic file path
+    wxString currentPath = m_frame->GetCurrentFileName();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Current file path='%s'" ), currentPath );
+
+    if( currentPath.IsEmpty() )
+    {
+        m_lastToolError = _( "No schematic file is currently open" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Read current file contents
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Opening file for reading" ) );
+    wxFile file( currentPath, wxFile::read );
+    if( !file.IsOpened() )
+    {
+        m_lastToolError = wxString::Format( _( "Failed to open schematic file: %s" ), currentPath );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString fileContents;
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading file contents" ) );
+    if( !file.ReadAll( &fileContents ) )
+    {
+        m_lastToolError = _( "Failed to read schematic file" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+    file.Close();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: File read successfully, size=%zu bytes" ), fileContents.length() );
+
+    // Apply patch using system patch command
+    // Create temporary files for patch and output
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary files" ) );
+    wxString tempDir = wxFileName::GetTempDir();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Temp directory='%s'" ), tempDir );
+
+    wxString patchFile =
+            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_patch_" ) );
+    wxString inputFile =
+            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_input_" ) );
+    wxString outputFile = inputFile + wxS( ".patched" );
+
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: patchFile='%s'" ), patchFile );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: inputFile='%s'" ), inputFile );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: outputFile='%s'" ), outputFile );
+
+    // Write patch to temp file
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patch to temp file" ) );
+    wxFile patchF( patchFile, wxFile::write );
+    if( !patchF.IsOpened() || !patchF.Write( patch ) )
+    {
+        m_lastToolError = _( "Failed to write patch to temporary file" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( patchFile );
+        wxRemoveFile( inputFile );
+        return false;
+    }
+    patchF.Close();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch file written successfully" ) );
+
+    // Write current contents to temp file
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing input to temp file" ) );
+    wxFile inputF( inputFile, wxFile::write );
+    if( !inputF.IsOpened() || !inputF.Write( fileContents ) )
+    {
+        m_lastToolError = _( "Failed to write input to temporary file" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( patchFile );
+        wxRemoveFile( inputFile );
+        return false;
+    }
+    inputF.Close();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Input file written successfully" ) );
+
+    // Apply patch using system command
+    wxString patchCmd = wxString::Format( wxS( "patch -s -o %s %s %s" ), outputFile, inputFile, patchFile );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing patch command: %s" ), patchCmd );
+
+    wxArrayString output, errors;
+    int           result = wxExecute( patchCmd, output, errors, wxEXEC_SYNC );
+
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch command completed with result=%d" ), result );
+    if( !output.IsEmpty() )
+    {
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch output: %s" ), output[0] );
+    }
+    if( !errors.IsEmpty() )
+    {
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch errors: %s" ), errors[0] );
+    }
+
+    // Clean up patch and input files
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Cleaning up temp files" ) );
+    wxRemoveFile( patchFile );
+    wxRemoveFile( inputFile );
+
+    if( result != 0 )
+    {
+        wxString errorMsg = _( "Failed to apply patch" );
+        if( !errors.IsEmpty() )
+        {
+            errorMsg += wxS( ": " ) + errors[0];
+        }
+        m_lastToolError = errorMsg;
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( outputFile );
+        return false;
+    }
+
+    // Read patched contents
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading patched file" ) );
+    wxFile outputF( outputFile, wxFile::read );
+    if( !outputF.IsOpened() )
+    {
+        m_lastToolError = _( "Failed to read patched file" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( outputFile );
+        return false;
+    }
+
+    wxString patchedContents;
+    if( !outputF.ReadAll( &patchedContents ) )
+    {
+        m_lastToolError = _( "Failed to read patched contents" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( outputFile );
+        return false;
+    }
+    outputF.Close();
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patched file read, size=%zu bytes" ), patchedContents.length() );
+
+    // Write patched contents to another temp file for loading
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patched contents to load file" ) );
+    wxString loadFile =
+            wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) );
+    wxFile loadF( loadFile, wxFile::write );
+    if( !loadF.IsOpened() || !loadF.Write( patchedContents ) )
+    {
+        m_lastToolError = _( "Failed to write patched contents for loading" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( outputFile );
+        wxRemoveFile( loadFile );
+        return false;
+    }
+    loadF.Close();
+    wxRemoveFile( outputFile );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Load file='%s'" ), loadFile );
+
+    // Load patched schematic using SCH_IO
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating SCH_IO plugin" ) );
+    SCH_IO_MGR::SCH_FILE_T fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( loadFile, KICTL_KICAD_ONLY );
+    IO_RELEASER<SCH_IO>    io( SCH_IO_MGR::FindPlugin( fileType ) );
+
+    if( !io )
+    {
+        m_lastToolError = _( "Failed to create schematic IO plugin" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( loadFile );
+        return false;
+    }
+
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary schematic" ) );
+    SCHEMATIC tempSchematic( &m_frame->Schematic().Project() );
+    tempSchematic.CreateDefaultScreens();
+
+    SCH_SHEET* newRootSheet = nullptr;
+    try
+    {
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Loading patched schematic file" ) );
+        newRootSheet = io->LoadSchematicFile( loadFile, &tempSchematic );
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Schematic loaded successfully" ) );
+    }
+    catch( const std::exception& e )
+    {
+        m_lastToolError =
+                wxString::Format( _( "Failed to load patched schematic: %s" ), wxString::FromUTF8( e.what() ) );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        wxRemoveFile( loadFile );
+        return false;
+    }
+
+    wxRemoveFile( loadFile );
+
+    if( !newRootSheet )
+    {
+        m_lastToolError = _( "Failed to load patched schematic" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    tempSchematic.SetTopLevelSheets( { newRootSheet } );
+
+    // Use SCH_COMMIT to replace items in RAM
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting SCH_COMMIT operations" ) );
+    SCH_COMMIT  commit( m_frame );
+    SCH_SCREEN* currentScreen = m_frame->GetScreen();
+    SCH_SCREEN* newScreen = newRootSheet->GetScreen();
+
+    if( !currentScreen || !newScreen )
+    {
+        m_lastToolError = _( "Invalid screen state" );
+        wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Remove all existing items
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Removing existing items" ) );
+    std::vector<SCH_ITEM*> itemsToRemove;
+    for( SCH_ITEM* item : currentScreen->Items() )
+    {
+        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+        {
+            itemsToRemove.push_back( item );
+        }
+    }
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to remove" ), itemsToRemove.size() );
+
+    for( SCH_ITEM* item : itemsToRemove )
+    {
+        commit.Remove( item, currentScreen );
+    }
+
+    // Add all new items
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Adding new items" ) );
+    std::vector<SCH_ITEM*> itemsToAdd;
+    for( SCH_ITEM* item : newScreen->Items() )
+    {
+        if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
+        {
+            SCH_ITEM* clonedItem = static_cast<SCH_ITEM*>( item->Clone() );
+            itemsToAdd.push_back( clonedItem );
+        }
+    }
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to add" ), itemsToAdd.size() );
+
+    for( SCH_ITEM* item : itemsToAdd )
+    {
+        commit.Add( item, currentScreen );
+    }
+
+    // Push commit - this automatically handles:
+    // - Undo/redo
+    // - Screen updates
+    // - View updates
+    // - Connectivity recalculation
+    // - Hierarchy refresh
+    // - UI events
+    // - Canvas refresh
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Pushing commit with message='%s'" ), commitMessage );
+    commit.Push( commitMessage );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed successfully" ) );
+
+    // Update connectivity and hierarchy
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing hierarchy and connectivity" ) );
+    m_frame->Schematic().RefreshHierarchy();
+    m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+
+    if( m_frame->GetCanvas() )
+    {
+        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
+        m_frame->GetCanvas()->Refresh();
+    }
+
+    m_lastToolResult = wxS( "{\"ok\": true, \"message\": \"Patch applied successfully\"}" );
+    wxLogMessage( wxS( "[OllamaAgent] apply_patch: COMPLETED SUCCESSFULLY" ) );
 
     return true;
 }

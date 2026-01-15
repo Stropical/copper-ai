@@ -133,6 +133,7 @@ private:
     bool HandleGetDatasheetTool( const nlohmann::json& aPayload );
     bool HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
     bool HandleSearchSymbolTool( const nlohmann::json& aPayload );
+    bool HandleApplyPatchTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT> m_agent;
