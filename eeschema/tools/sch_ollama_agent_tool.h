@@ -48,7 +48,6 @@ public:
 class SCH_OLLAMA_AGENT_TOOL : public SCH_TOOL_BASE<SCH_EDIT_FRAME>
 {
 public:
-
     SCH_OLLAMA_AGENT_TOOL();
     ~SCH_OLLAMA_AGENT_TOOL() override;
 
@@ -106,7 +105,7 @@ public:
     /**
      * Execute a tool command immediately (used by asynchronous handlers).
      */
-    bool RunToolCommand( const wxString& aToolName, const wxString& aPayload );
+    bool     RunToolCommand( const wxString& aToolName, const wxString& aPayload );
     wxString GetLastToolError() const { return m_lastToolError; }
     wxString GetLastToolResult() const { return m_lastToolResult; }
 
@@ -118,31 +117,33 @@ private:
      */
     struct SYMBOL_MATCH
     {
-        SCH_SYMBOL*     symbol = nullptr;
-        SCH_SHEET_PATH  sheet;
+        SCH_SYMBOL*    symbol = nullptr;
+        SCH_SHEET_PATH sheet;
     };
 
     SYMBOL_MATCH findSymbolByRefOrValue( const wxString& aIdentifier, bool aCurrentSheetOnly = false );
 
-    bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
-    bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
-    bool HandleMoveComponentTool( const nlohmann::json& aPayload );
-    bool HandleAddWireTool( const nlohmann::json& aPayload );
-    bool HandleAddNetLabelTool( const nlohmann::json& aPayload );
-    bool HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
-    bool HandleGetDatasheetTool( const nlohmann::json& aPayload );
-    bool HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
-    bool HandleSearchSymbolTool( const nlohmann::json& aPayload );
-    bool HandleApplyPatchTool( const nlohmann::json& aPayload );
+    bool     ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
+    bool     HandlePlaceComponentTool( const nlohmann::json& aPayload );
+    bool     HandleRemoveComponentTool( const nlohmann::json& aPayload );
+    bool     HandleSetPropertyTool( const nlohmann::json& aPayload );
+    bool     HandleMoveComponentTool( const nlohmann::json& aPayload );
+    bool     HandleAddWireTool( const nlohmann::json& aPayload );
+    bool     HandleAddNetLabelTool( const nlohmann::json& aPayload );
+    bool     HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
+    bool     HandleGetDatasheetTool( const nlohmann::json& aPayload );
+    bool     HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
+    bool     HandleSearchSymbolTool( const nlohmann::json& aPayload );
+    bool     HandleApplyPatchTool( const nlohmann::json& aPayload );
     wxString GetCurrentSchematicContent();
 
-    std::unique_ptr<SCH_AGENT> m_agent;
-    std::unique_ptr<OLLAMA_CLIENT> m_ollama;
-    wxString m_model;  // Default model name
-    SCH_OLLAMA_TOOL_CALL_HANDLER* m_toolCallHandler = nullptr;
-    wxString m_lastToolError;
-    wxString m_lastToolResult;
-    std::unique_ptr<class SCH_TOOL_HTTP_SERVER> m_httpServer;  // HTTP server for tool API
+    std::unique_ptr<SCH_AGENT>                  m_agent;
+    std::unique_ptr<OLLAMA_CLIENT>              m_ollama;
+    wxString                                    m_model; // Default model name
+    SCH_OLLAMA_TOOL_CALL_HANDLER*               m_toolCallHandler = nullptr;
+    wxString                                    m_lastToolError;
+    wxString                                    m_lastToolResult;
+    std::unique_ptr<class SCH_TOOL_HTTP_SERVER> m_httpServer; // HTTP server for tool API
 };
 
 #endif // SCH_OLLAMA_AGENT_TOOL_H

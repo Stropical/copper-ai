@@ -690,7 +690,8 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
 
             // Bug fix: Updated to include all tools that ExecuteToolCommand actually handles
             bool supportedTool =
-                    lowerTool == wxS( "schematic.place_component" ) || lowerTool == wxS( "schematic.move_component" )
+                    lowerTool == wxS( "schematic.place_component" ) || lowerTool == wxS( "schematic.remove_component" )
+                    || lowerTool == wxS( "schematic.set_property" ) || lowerTool == wxS( "schematic.move_component" )
                     || lowerTool == wxS( "schematic.add_wire" ) || lowerTool == wxS( "schematic.add_net_label" )
                     || lowerTool == wxS( "schematic.add_global_label" ) || lowerTool == wxS( "schematic.add_label" )
                     || lowerTool == wxS( "schematic.connect_with_net_label" )
@@ -852,6 +853,38 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         {
             wxLogWarning( wxS( "[OllamaAgent] move_component payload parse error: %s" ),
                           wxString::FromUTF8( e.what() ) );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.remove_component" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleRemoveComponentTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError =
+                    wxString::Format( _( "remove_component payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+    }
+
+    if( aToolName.CmpNoCase( wxS( "schematic.set_property" ) ) == 0 )
+    {
+        try
+        {
+            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
+            return HandleSetPropertyTool( payload );
+        }
+        catch( const json::exception& e )
+        {
+            m_lastToolError =
+                    wxString::Format( _( "set_property payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
             return false;
         }
     }
@@ -1632,6 +1665,244 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     json res = json::object();
     res["reference"] = ref.ToStdString();
     res["symbol"] = symbolId.ToStdString();
+    m_lastToolResult = wxString::FromUTF8( res.dump( 2 ) );
+
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleRemoveComponentTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    if( !aPayload.contains( "reference" ) || !aPayload["reference"].is_string() )
+    {
+        m_lastToolError = _( "remove_component requires \"reference\" (string), e.g. {\"reference\":\"R1\"}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString reference = wxString::FromUTF8( aPayload["reference"].get<std::string>() );
+    reference.Trim( true ).Trim( false );
+
+    if( reference.IsEmpty() )
+    {
+        m_lastToolError = _( "remove_component requires a non-empty reference." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Find the symbol by reference (or value/symbol name as fallback)
+    SYMBOL_MATCH   match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL*    symbol = match.symbol;
+    SCH_SHEET_PATH symbolSheet = match.sheet;
+
+    if( !symbol )
+    {
+        m_lastToolError = wxString::Format( _( "Component \"%s\" not found." ), reference );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    SCH_SCREEN* screen = symbolSheet.LastScreen();
+    if( !screen )
+    {
+        m_lastToolError = _( "Could not get screen for the symbol's sheet." );
+        return false;
+    }
+
+    // Get the actual reference for the result (in case we matched by value)
+    wxString actualRef = symbol->GetRef( &symbolSheet, false );
+
+    wxString commitMsg = wxString::Format( _( "Remove component %s" ), actualRef );
+
+    // Defer the removal to the main thread for proper undo/redo and UI update
+    m_frame->CallAfter(
+            [this, symbol, screen, commitMsg]()
+            {
+                SCH_COMMIT commit( m_frame );
+
+                // First deselect if selected
+                if( m_frame->GetToolManager() )
+                {
+                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::unselectItem, symbol );
+                }
+
+                // Remove from screen and record for undo
+                m_frame->RemoveFromScreen( symbol, screen );
+                commit.Removed( symbol, screen );
+                commit.Push( commitMsg );
+
+                // Refresh the canvas
+                if( m_frame->GetCanvas() )
+                {
+                    m_frame->GetCanvas()->Refresh();
+                }
+
+                m_frame->OnModify();
+            } );
+
+    // Return confirmation
+    json res = json::object();
+    res["removed"] = actualRef.ToStdString();
+    res["message"] = wxString::Format( _( "Component %s removed." ), actualRef ).ToStdString();
+    m_lastToolResult = wxString::FromUTF8( res.dump( 2 ) );
+
+    return true;
+}
+
+
+bool SCH_OLLAMA_AGENT_TOOL::HandleSetPropertyTool( const json& aPayload )
+{
+    if( !m_frame || !aPayload.is_object() )
+        return false;
+
+    // Required: reference of the component
+    if( !aPayload.contains( "reference" ) || !aPayload["reference"].is_string() )
+    {
+        m_lastToolError = _( "set_property requires \"reference\" (string), e.g. {\"reference\":\"R1\", "
+                             "\"property_name\":\"Value\", \"value\":\"10k\"}." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Required: property name
+    if( !aPayload.contains( "property_name" ) || !aPayload["property_name"].is_string() )
+    {
+        m_lastToolError = _( "set_property requires \"property_name\" (string). Common values: \"Reference\", "
+                             "\"Value\", \"Footprint\"." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Required: new value
+    if( !aPayload.contains( "value" ) || !aPayload["value"].is_string() )
+    {
+        m_lastToolError = _( "set_property requires \"value\" (string)." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    wxString reference = wxString::FromUTF8( aPayload["reference"].get<std::string>() );
+    wxString propertyName = wxString::FromUTF8( aPayload["property_name"].get<std::string>() );
+    wxString newValue = wxString::FromUTF8( aPayload["value"].get<std::string>() );
+
+    reference.Trim( true ).Trim( false );
+    propertyName.Trim( true ).Trim( false );
+
+    if( reference.IsEmpty() || propertyName.IsEmpty() )
+    {
+        m_lastToolError = _( "set_property requires non-empty reference and property_name." );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    // Find the symbol
+    SYMBOL_MATCH   match = findSymbolByRefOrValue( reference );
+    SCH_SYMBOL*    symbol = match.symbol;
+    SCH_SHEET_PATH symbolSheet = match.sheet;
+
+    if( !symbol )
+    {
+        m_lastToolError = wxString::Format( _( "Component \"%s\" not found." ), reference );
+        wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+        return false;
+    }
+
+    SCH_SCREEN* screen = symbolSheet.LastScreen();
+    if( !screen )
+    {
+        m_lastToolError = _( "Could not get screen for the symbol's sheet." );
+        return false;
+    }
+
+    wxString actualRef = symbol->GetRef( &symbolSheet, false );
+    wxString oldValue;
+
+    // Handle special cases for Reference field
+    if( propertyName.CmpNoCase( wxS( "Reference" ) ) == 0 )
+    {
+        oldValue = actualRef;
+        wxString commitMsg = wxString::Format( _( "Change %s to %s" ), actualRef, newValue );
+
+        m_frame->CallAfter(
+                [this, symbol, screen, symbolSheet, newValue, commitMsg]()
+                {
+                    SCH_COMMIT commit( m_frame );
+                    commit.Modify( symbol, screen );
+                    symbol->SetRef( &symbolSheet, newValue );
+                    commit.Push( commitMsg );
+
+                    if( m_frame->GetCanvas() )
+                        m_frame->GetCanvas()->Refresh();
+                    m_frame->OnModify();
+                } );
+    }
+    else
+    {
+        // Find the field by name
+        SCH_FIELD* field = nullptr;
+
+        if( propertyName.CmpNoCase( wxS( "Value" ) ) == 0 )
+        {
+            field = symbol->GetField( FIELD_T::VALUE );
+        }
+        else if( propertyName.CmpNoCase( wxS( "Footprint" ) ) == 0 )
+        {
+            field = symbol->GetField( FIELD_T::FOOTPRINT );
+        }
+        else if( propertyName.CmpNoCase( wxS( "Datasheet" ) ) == 0 )
+        {
+            field = symbol->GetField( FIELD_T::DATASHEET );
+        }
+        else
+        {
+            // Try to find user-defined field by name
+            for( SCH_FIELD& f : symbol->GetFields() )
+            {
+                if( f.GetName().CmpNoCase( propertyName ) == 0 )
+                {
+                    field = &f;
+                    break;
+                }
+            }
+        }
+
+        if( !field )
+        {
+            m_lastToolError =
+                    wxString::Format( _( "Property \"%s\" not found on component %s." ), propertyName, actualRef );
+            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
+            return false;
+        }
+
+        oldValue = field->GetText();
+        wxString commitMsg = wxString::Format( _( "Set %s.%s = \"%s\"" ), actualRef, propertyName, newValue );
+
+        m_frame->CallAfter(
+                [this, symbol, field, screen, newValue, commitMsg]()
+                {
+                    SCH_COMMIT commit( m_frame );
+                    commit.Modify( symbol, screen );
+                    field->SetText( newValue );
+                    commit.Push( commitMsg );
+
+                    if( m_frame->GetCanvas() )
+                        m_frame->GetCanvas()->Refresh();
+                    m_frame->OnModify();
+                } );
+    }
+
+    // Return confirmation
+    json res = json::object();
+    res["reference"] = actualRef.ToStdString();
+    res["property"] = propertyName.ToStdString();
+    res["old_value"] = oldValue.ToStdString();
+    res["new_value"] = newValue.ToStdString();
+    res["message"] =
+            wxString::Format( _( "Set %s.%s from \"%s\" to \"%s\"" ), actualRef, propertyName, oldValue, newValue )
+                    .ToStdString();
     m_lastToolResult = wxString::FromUTF8( res.dump( 2 ) );
 
     return true;

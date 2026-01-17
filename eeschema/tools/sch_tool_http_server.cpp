@@ -586,8 +586,8 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
     // Handle other tools that need schematic. prefix
     else if( !mappedToolName.StartsWith( wxT( "schematic." ) )
              && ( mappedToolName == wxT( "get_symbol_info" ) || mappedToolName == wxT( "place_component" )
-                  || mappedToolName == wxT( "get_netlist" ) || mappedToolName == wxT( "get_sheet_info" )
-                  || mappedToolName == wxT( "apply_patch" ) ) )
+                  || mappedToolName == wxT( "remove_component" ) || mappedToolName == wxT( "get_netlist" )
+                  || mappedToolName == wxT( "get_sheet_info" ) || mappedToolName == wxT( "apply_patch" ) ) )
     {
         mappedToolName = wxT( "schematic." ) + mappedToolName;
     }
