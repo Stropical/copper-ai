@@ -2118,6 +2118,21 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
     VECTOR2I   pinPos;
     SPIN_STYLE spinStyle = SPIN_STYLE::RIGHT;
 
+    // Allow explicit orientation override: "orientation": "left"/"right"/"up"/"down"
+    if( aPayload.contains( "orientation" ) && aPayload["orientation"].is_string() )
+    {
+        wxString orient = wxString::FromUTF8( aPayload["orientation"].get<std::string>() );
+        orient.MakeLower();
+        if( orient == wxS( "left" ) )
+            spinStyle = SPIN_STYLE::LEFT;
+        else if( orient == wxS( "right" ) )
+            spinStyle = SPIN_STYLE::RIGHT;
+        else if( orient == wxS( "up" ) )
+            spinStyle = SPIN_STYLE::UP;
+        else if( orient == wxS( "down" ) )
+            spinStyle = SPIN_STYLE::BOTTOM;
+    }
+
     // Mode A: coordinates (mm)
     if( aPayload.contains( "x" ) && aPayload.contains( "y" ) && aPayload["x"].is_number() && aPayload["y"].is_number() )
     {
