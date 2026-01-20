@@ -234,28 +234,9 @@ void SCH_TOOL_HTTP_SERVER::HandleClient( wxSocketBase* aSocket )
             return;
     }
 
-    struct SOCKET_SCOPE_CLOSER
-    {
-        wxSocketBase* socket;
-
-        ~SOCKET_SCOPE_CLOSER()
-        {
-            // Defensive checks to avoid wxWidgets macOS CFRelease(NULL) crash in sockosx.cpp
-            if( socket && socket->IsOk() )
-            {
-                try
-                {
-                    // Only close if socket is in a valid state
-                    socket->Close();
-                }
-                catch( ... )
-                {
-                    // Swallow any exceptions during socket close to prevent crash
-                    wxLogWarning( wxS( "[HTTP Server] Exception during socket close" ) );
-                }
-            }
-        }
-    } socketCloser{ aSocket };
+    // Note: Socket cleanup is handled by the unique_ptr<wxSocketBase> in Entry().
+    // We do NOT explicitly call Close() here to avoid double-close which causes
+    // CFRelease(NULL) crash on macOS when the socket's internal CFSocket is already freed.
 
     // Read request
     char     buffer[8192];
