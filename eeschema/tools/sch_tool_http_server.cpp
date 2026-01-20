@@ -24,9 +24,9 @@
 #include <wx/string.h>
 #include <wx/app.h>
 #include <wx/thread.h>
+#include <wx/event.h>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <sstream>
 
 using json = nlohmann::json;
 
@@ -37,6 +37,7 @@ SCH_TOOL_HTTP_SERVER::SCH_TOOL_HTTP_SERVER( SCH_OLLAMA_AGENT_TOOL* aTool, int aP
         m_running( false ),
         m_server( nullptr )
 {
+    wxLog::SetLogLevel( wxLOG_Max );
 }
 
 
@@ -130,10 +131,15 @@ void SCH_TOOL_HTTP_SERVER::StopServer()
         wasRunning = true;
         m_running = false;
 
-        // Close the server socket to stop accepting new connections
-        // This will cause Accept() to fail and the thread to exit
+        // CRITICAL FIX for macOS CFSocket crash:
+        // Disable socket notifications BEFORE closing/destroying the socket.
+        // On macOS, CFSocket uses run loop callbacks that may still be pending
+        // after the socket is freed. If a callback fires on a freed socket,
+        // it causes CFRelease(NULL) crash in wxSocketImplMac::DoClose().
         if( m_server )
         {
+            m_server->SetNotify( 0 );
+            m_server->Notify( false );
             m_server->Close();
         }
 
@@ -157,7 +163,8 @@ void SCH_TOOL_HTTP_SERVER::StopServer()
         wxMutexLocker lock( m_mutex );
         if( m_server )
         {
-            delete m_server;
+            // Use Destroy() instead of delete for proper cleanup
+            m_server->Destroy();
             m_server = nullptr;
         }
     }
@@ -165,12 +172,71 @@ void SCH_TOOL_HTTP_SERVER::StopServer()
     wxLogMessage( wxT( "[ToolServer] HTTP server stopped" ) );
 }
 
-
 void SCH_TOOL_HTTP_SERVER::ClearTool()
 {
     wxMutexLocker lock( m_mutex );
     m_tool = nullptr;
 }
+
+
+/**
+ * Worker thread for handling HTTP clients
+ */
+class SCH_HTTP_CLIENT_HANDLER : public wxThread
+{
+public:
+    SCH_HTTP_CLIENT_HANDLER( SCH_TOOL_HTTP_SERVER* aServer, wxSocketBase* aSocket ) :
+            wxThread( wxTHREAD_DETACHED ),
+            m_server( aServer ),
+            m_socket( aSocket )
+    {
+    }
+
+    ~SCH_HTTP_CLIENT_HANDLER()
+    {
+        // Socket is cleaned up via CallAfter to main thread - nothing to do here
+    }
+
+protected:
+    void* Entry() override
+    {
+        if( m_server && m_socket )
+        {
+            m_server->HandleClient( m_socket );
+        }
+
+        // CRITICAL FIX for macOS CFSocket crash:
+        // Socket cleanup MUST happen on the main thread because CFSocket callbacks
+        // run on the main thread's run loop. Closing from a worker thread races
+        // with pending callbacks, causing CFRelease(NULL) crashes.
+        //
+        // Solution: Queue cleanup to main thread using CallAfter.
+        if( m_socket )
+        {
+            wxSocketBase* socketToDelete = m_socket;
+            m_socket = nullptr; // Prevent any further access from this thread
+
+            // Queue cleanup to main thread
+            wxTheApp->CallAfter(
+                    [socketToDelete]()
+                    {
+                        if( socketToDelete )
+                        {
+                            socketToDelete->SetNotify( 0 );
+                            socketToDelete->Notify( false );
+                            socketToDelete->Close();
+                            delete socketToDelete;
+                        }
+                    } );
+        }
+
+        return nullptr;
+    }
+
+private:
+    SCH_TOOL_HTTP_SERVER* m_server;
+    wxSocketBase*         m_socket;
+};
 
 
 void* SCH_TOOL_HTTP_SERVER::Entry()
@@ -204,11 +270,24 @@ void* SCH_TOOL_HTTP_SERVER::Entry()
 
         if( client && client->IsOk() )
         {
-            // Handle client in a way that doesn't block the server thread
+            // Handle client in a separate thread to support concurrent requests
             // Set socket to non-blocking to avoid hanging
             client->SetFlags( wxSOCKET_NOWAIT );
-            client->SetTimeout( 2 );
-            HandleClient( client.get() );
+            // Note: HandleClient will likely set its own timeout/blocking mode
+
+            // Create worker thread, passing ownership of the socket
+            SCH_HTTP_CLIENT_HANDLER* handler = new SCH_HTTP_CLIENT_HANDLER( this, client.release() );
+
+            if( handler->Create() != wxTHREAD_NO_ERROR )
+            {
+                wxLogError( wxT( "[ToolServer] Failed to create client handler thread" ) );
+                delete handler; // Destructor cleans up socket
+            }
+            else if( handler->Run() != wxTHREAD_NO_ERROR )
+            {
+                wxLogError( wxT( "[ToolServer] Failed to run client handler thread" ) );
+                delete handler;
+            }
         }
         else
         {
@@ -569,8 +648,7 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
              && ( mappedToolName == wxT( "get_symbol_info" ) || mappedToolName == wxT( "place_component" )
                   || mappedToolName == wxT( "remove_component" ) || mappedToolName == wxT( "set_property" )
                   || mappedToolName == wxT( "add_wire" ) || mappedToolName == wxT( "add_global_label" )
-                  || mappedToolName == wxT( "get_netlist" ) || mappedToolName == wxT( "get_sheet_info" )
-                  || mappedToolName == wxT( "apply_patch" ) ) )
+                  || mappedToolName == wxT( "get_netlist" ) || mappedToolName == wxT( "get_sheet_info" ) ) )
     {
         mappedToolName = wxT( "schematic." ) + mappedToolName;
     }
@@ -701,54 +779,71 @@ wxString SCH_TOOL_HTTP_SERVER::HandleToolRequest( const wxString& aToolName, con
                                     wxT( "TOOL_NOT_IMPLEMENTED" ) );
     }
 
-    // Execute tool command (tool pointer is still valid from above) on the main thread
-    // This is required to prevent crashes due to cross-thread GUI operations (e.g. OpenGL, canvas updates)
-    bool success = false;
+    // Execute tool command on the main thread using CallAfter + semaphore.
+    // This is REQUIRED because tool commands manipulate GUI elements (symbols, wires, etc.)
+    // and calling them from a worker thread causes crashes.
+    // We use wxWakeUpIdle() to make the main thread process events immediately.
 
-    // We use a semaphore to wait for the main thread to complete the execution
     struct TOOL_CONTEXT
     {
         SCH_OLLAMA_AGENT_TOOL* tool;
         wxString               name;
         wxString               payload;
         bool                   success;
+        wxString               result;
+        wxString               error;
         wxSemaphore            semaphore;
-    } context;
+    };
 
-    context.tool = tool;
-    context.name = mappedToolName;
-    context.payload = mappedArgsJson;
-    context.success = false;
+    auto context = std::make_shared<TOOL_CONTEXT>();
+    context->tool = tool;
+    context->name = mappedToolName;
+    context->payload = mappedArgsJson;
+    context->success = false;
 
+    // Queue execution on main thread
     wxTheApp->CallAfter(
-            [&context]()
+            [context]()
             {
-                context.success = context.tool->RunToolCommand( context.name, context.payload );
-                context.semaphore.Post();
+                context->success = context->tool->RunToolCommand( context->name, context->payload );
+                if( context->success )
+                    context->result = context->tool->GetLastToolResult();
+                else
+                    context->error = context->tool->GetLastToolError();
+
+                context->semaphore.Post();
             } );
 
-    // Wait for the main thread to complete (with a 60s safety timeout to avoid permanent hang if main thread is gone)
-    if( context.semaphore.WaitTimeout( 60000 ) != wxSEMA_NO_ERROR )
+    // Wake up the main thread to process the event immediately
+    // Use multiple mechanisms to ensure the event is processed ASAP
+    wxWakeUpIdle();
+
+    // Also post an idle event directly to force event processing
+    if( wxTheApp && wxTheApp->GetTopWindow() )
     {
-        wxLogWarning( wxS( "[ToolServer] Timeout waiting for main thread to execute tool '%s'" ), mappedToolName );
-        return CreateErrorResponse( wxS( "Main thread timeout" ), wxS( "MAIN_THREAD_TIMEOUT" ) );
+        wxIdleEvent idleEvent;
+        wxTheApp->GetTopWindow()->GetEventHandler()->AddPendingEvent( idleEvent );
     }
 
-    success = context.success;
-
-    if( success )
+    // Wait for the main thread to complete (10s timeout - should be more than enough)
+    if( context->semaphore.WaitTimeout( 10000 ) != wxSEMA_NO_ERROR )
     {
-        wxString result = tool->GetLastToolResult();
-        if( result.IsEmpty() )
+        wxLogWarning( wxS( "[ToolServer] Timeout waiting for main thread to execute tool '%s'" ), mappedToolName );
+        return CreateErrorResponse( wxS( "Main thread timeout - is KiCad responsive?" ), wxS( "MAIN_THREAD_TIMEOUT" ) );
+    }
+
+    if( context->success )
+    {
+        if( context->result.IsEmpty() )
         {
             // Return empty JSON object if no result
             return CreateSuccessResponse( wxT( "{}" ) );
         }
-        return CreateSuccessResponse( result );
+        return CreateSuccessResponse( context->result );
     }
     else
     {
-        wxString error = tool->GetLastToolError();
+        wxString error = context->error;
         if( error.IsEmpty() )
         {
             error = wxString::Format( wxT( "Tool '%s' execution failed" ), mappedToolName );

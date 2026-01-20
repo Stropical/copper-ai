@@ -697,8 +697,7 @@ bool SCH_OLLAMA_AGENT_TOOL::ParseAndExecute( const wxString& aResponse )
                     || lowerTool == wxS( "schematic.connect_with_net_label" )
                     || lowerTool == wxS( "schematic.connect_with_global_label" )
                     || lowerTool == wxS( "schematic.get_datasheet" ) || lowerTool == wxS( "schematic.get_symbol_info" )
-                    || lowerTool == wxS( "schematic.search_symbol" ) || lowerTool == wxS( "schematic.apply_patch" )
-                    || lowerTool == wxS( "mock.selection_inspector" );
+                    || lowerTool == wxS( "schematic.search_symbol" ) || lowerTool == wxS( "mock.selection_inspector" );
 
             if( !supportedTool )
             {
@@ -986,21 +985,6 @@ bool SCH_OLLAMA_AGENT_TOOL::ExecuteToolCommand( const wxString& aToolName, const
         }
     }
 
-    if( aToolName.CmpNoCase( wxS( "schematic.apply_patch" ) ) == 0 )
-    {
-        try
-        {
-            json payload = aPayload.IsEmpty() ? json::object() : json::parse( aPayload.ToStdString() );
-            return HandleApplyPatchTool( payload );
-        }
-        catch( const json::exception& e )
-        {
-            m_lastToolError =
-                    wxString::Format( _( "apply_patch payload parse error: %s" ), wxString::FromUTF8( e.what() ) );
-            wxLogWarning( wxS( "[OllamaAgent] %s" ), m_lastToolError );
-            return false;
-        }
-    }
 
     wxLogWarning( wxS( "[OllamaAgent] Unknown tool requested: %s" ), aToolName.wx_str() );
     m_lastToolError = wxString::Format( _( "Unknown tool requested: %s" ), aToolName );
@@ -1631,34 +1615,31 @@ bool SCH_OLLAMA_AGENT_TOOL::HandlePlaceComponentTool( const json& aPayload )
     // Store reference before deferring UI operations
     wxString ref = newSymbol->GetRef( &sheet, false );
 
-    // Defer all UI operations to the main thread (required on macOS)
-    m_frame->CallAfter(
-            [this, newSymbol, screen, ref, symbolId]()
+    {
+        SCH_COMMIT commit( m_frame );
+        // Ensure the symbol is permanently added to the screen and view.
+        m_frame->AddToScreen( newSymbol, screen );
+        commit.Added( newSymbol, screen );
+        commit.Push( _( "Place component" ) );
+
+        // Ensure the canvas refreshes so the new component is visible immediately.
+        if( m_frame->GetCanvas() )
+        {
+            if( auto view = m_frame->GetCanvas()->GetView() )
             {
-                SCH_COMMIT commit( m_frame );
-                // Ensure the symbol is permanently added to the screen and view.
-                m_frame->AddToScreen( newSymbol, screen );
-                commit.Added( newSymbol, screen );
-                commit.Push( _( "Place component" ) );
+                view->Update( newSymbol );
+            }
 
-                // Ensure the canvas refreshes so the new component is visible immediately.
-                if( m_frame->GetCanvas() )
-                {
-                    if( auto view = m_frame->GetCanvas()->GetView() )
-                    {
-                        view->Update( newSymbol );
-                    }
+            m_frame->GetCanvas()->Refresh();
+        }
 
-                    m_frame->GetCanvas()->Refresh();
-                }
+        m_frame->OnModify();
 
-                m_frame->OnModify();
-
-                if( m_frame->GetToolManager() )
-                {
-                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
-                }
-            } );
+        if( m_frame->GetToolManager() )
+        {
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, newSymbol );
+        }
+    }
 
     // Return the assigned reference so the agent can use it for labels/wiring.
     // Note: UI operations are deferred, but the symbol is already added to the screen above
@@ -1718,30 +1699,28 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleRemoveComponentTool( const json& aPayload )
     wxString commitMsg = wxString::Format( _( "Remove component %s" ), actualRef );
 
     // Defer the removal to the main thread for proper undo/redo and UI update
-    m_frame->CallAfter(
-            [this, symbol, screen, commitMsg]()
-            {
-                SCH_COMMIT commit( m_frame );
+    {
+        SCH_COMMIT commit( m_frame );
 
-                // First deselect if selected
-                if( m_frame->GetToolManager() )
-                {
-                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::unselectItem, symbol );
-                }
+        // First deselect if selected
+        if( m_frame->GetToolManager() )
+        {
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::unselectItem, symbol );
+        }
 
-                // Remove from screen and record for undo
-                m_frame->RemoveFromScreen( symbol, screen );
-                commit.Removed( symbol, screen );
-                commit.Push( commitMsg );
+        // Remove from screen and record for undo
+        m_frame->RemoveFromScreen( symbol, screen );
+        commit.Removed( symbol, screen );
+        commit.Push( commitMsg );
 
-                // Refresh the canvas
-                if( m_frame->GetCanvas() )
-                {
-                    m_frame->GetCanvas()->Refresh();
-                }
+        // Refresh the canvas
+        if( m_frame->GetCanvas() )
+        {
+            m_frame->GetCanvas()->Refresh();
+        }
 
-                m_frame->OnModify();
-            } );
+        m_frame->OnModify();
+    }
 
     // Return confirmation
     json res = json::object();
@@ -1826,18 +1805,16 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSetPropertyTool( const json& aPayload )
         oldValue = actualRef;
         wxString commitMsg = wxString::Format( _( "Change %s to %s" ), actualRef, newValue );
 
-        m_frame->CallAfter(
-                [this, symbol, screen, symbolSheet, newValue, commitMsg]()
-                {
-                    SCH_COMMIT commit( m_frame );
-                    commit.Modify( symbol, screen );
-                    symbol->SetRef( &symbolSheet, newValue );
-                    commit.Push( commitMsg );
+        {
+            SCH_COMMIT commit( m_frame );
+            commit.Modify( symbol, screen );
+            symbol->SetRef( &symbolSheet, newValue );
+            commit.Push( commitMsg );
 
-                    if( m_frame->GetCanvas() )
-                        m_frame->GetCanvas()->Refresh();
-                    m_frame->OnModify();
-                } );
+            if( m_frame->GetCanvas() )
+                m_frame->GetCanvas()->Refresh();
+            m_frame->OnModify();
+        }
     }
     else
     {
@@ -1880,18 +1857,16 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleSetPropertyTool( const json& aPayload )
         oldValue = field->GetText();
         wxString commitMsg = wxString::Format( _( "Set %s.%s = \"%s\"" ), actualRef, propertyName, newValue );
 
-        m_frame->CallAfter(
-                [this, symbol, field, screen, newValue, commitMsg]()
-                {
-                    SCH_COMMIT commit( m_frame );
-                    commit.Modify( symbol, screen );
-                    field->SetText( newValue );
-                    commit.Push( commitMsg );
+        {
+            SCH_COMMIT commit( m_frame );
+            commit.Modify( symbol, screen );
+            field->SetText( newValue );
+            commit.Push( commitMsg );
 
-                    if( m_frame->GetCanvas() )
-                        m_frame->GetCanvas()->Refresh();
-                    m_frame->OnModify();
-                } );
+            if( m_frame->GetCanvas() )
+                m_frame->GetCanvas()->Refresh();
+            m_frame->OnModify();
+        }
     }
 
     // Return confirmation
@@ -2279,39 +2254,32 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddNetLabelTool( const json& aPayload )
 
     // Add to screen synchronously (data operation)
     m_frame->AddToScreen( label, targetScreen );
+    commit.Added( label, targetScreen );
 
-    // Defer UI operations to the main thread (required on macOS)
+    // Execution already occurs on the main thread, so Push and UI updates can be direct.
     wxString commitMsg = isLocal ? _( "Add net label" ) : _( "Add global label" );
-    m_frame->CallAfter(
-            [this, label, stub, targetScreen, commitMsg]()
-            {
-                SCH_COMMIT commit( m_frame );
-                if( stub )
-                    commit.Added( stub, targetScreen );
-                commit.Added( label, targetScreen );
-                commit.Push( commitMsg );
+    commit.Push( commitMsg );
 
-                if( m_frame->GetCanvas() )
-                {
-                    if( auto view = m_frame->GetCanvas()->GetView() )
-                    {
-                        if( stub )
-                            view->Update( stub );
-                        view->Update( label );
-                    }
+    if( m_frame->GetCanvas() )
+    {
+        if( auto view = m_frame->GetCanvas()->GetView() )
+        {
+            if( stub )
+                view->Update( stub );
+            view->Update( label );
+        }
 
-                    m_frame->GetCanvas()->Refresh();
-                }
+        m_frame->GetCanvas()->Refresh();
+    }
 
-                m_frame->OnModify();
+    m_frame->OnModify();
 
-                if( m_frame->GetToolManager() )
-                {
-                    if( stub )
-                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
-                    m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
-                }
-            } );
+    if( m_frame->GetToolManager() )
+    {
+        if( stub )
+            m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, stub );
+        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, label );
+    }
 
     return true;
 }
@@ -2624,34 +2592,31 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
         m_frame->AddToScreen( l1, targetScreen );
         m_frame->AddToScreen( l2, targetScreen );
 
-        // Defer UI operations to the main thread
-        m_frame->CallAfter(
-                [this, l1, l2, targetScreen]()
+        {
+            SCH_COMMIT commit( m_frame );
+            commit.Added( l1, targetScreen );
+            commit.Added( l2, targetScreen );
+            commit.Push( _( "Add net labels" ) );
+
+            if( m_frame->GetCanvas() )
+            {
+                if( auto view = m_frame->GetCanvas()->GetView() )
                 {
-                    SCH_COMMIT commit( m_frame );
-                    commit.Added( l1, targetScreen );
-                    commit.Added( l2, targetScreen );
-                    commit.Push( _( "Add net labels" ) );
+                    view->Update( l1 );
+                    view->Update( l2 );
+                }
 
-                    if( m_frame->GetCanvas() )
-                    {
-                        if( auto view = m_frame->GetCanvas()->GetView() )
-                        {
-                            view->Update( l1 );
-                            view->Update( l2 );
-                        }
+                m_frame->GetCanvas()->Refresh();
+            }
 
-                        m_frame->GetCanvas()->Refresh();
-                    }
+            m_frame->OnModify();
 
-                    m_frame->OnModify();
-
-                    if( m_frame->GetToolManager() )
-                    {
-                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
-                        m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
-                    }
-                } );
+            if( m_frame->GetToolManager() )
+            {
+                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l1 );
+                m_frame->GetToolManager()->RunAction<EDA_ITEM*>( ACTIONS::selectItem, l2 );
+            }
+        }
 
         return true;
     }
@@ -2871,380 +2836,6 @@ bool SCH_OLLAMA_AGENT_TOOL::HandleAddWireTool( const json& aPayload )
             } );
 
     return true;
-}
-
-
-bool SCH_OLLAMA_AGENT_TOOL::HandleApplyPatchTool( const json& aPayload )
-{
-    wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting execution" ) );
-
-    try
-    {
-        if( !m_frame || !aPayload.is_object() )
-        {
-            m_lastToolError = _( "Invalid payload for apply_patch" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        if( !aPayload.contains( "patch" ) || !aPayload["patch"].is_string() )
-        {
-            m_lastToolError = _( "apply_patch requires 'patch' (string) parameter" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        wxString patch = wxString::FromUTF8( aPayload["patch"].get<std::string>() );
-        wxString commitMessage = _( "Applied patch via AI agent" );
-
-        if( aPayload.contains( "commit_message" ) && aPayload["commit_message"].is_string() )
-        {
-            commitMessage = wxString::FromUTF8( aPayload["commit_message"].get<std::string>() );
-        }
-
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch length=%zu, commit_message='%s'" ), patch.length(),
-                      commitMessage );
-
-        // Get current schematic file path
-        wxString currentPath = m_frame->GetCurrentFileName();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Current file path='%s'" ), currentPath );
-
-        if( currentPath.IsEmpty() )
-        {
-            m_lastToolError = _( "No schematic file is currently open" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        // Read current file contents
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Opening file for reading" ) );
-        wxFile file( currentPath, wxFile::read );
-        if( !file.IsOpened() )
-        {
-            m_lastToolError = wxString::Format( _( "Failed to open schematic file: %s" ), currentPath );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        wxString fileContents;
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading file contents" ) );
-        if( !file.ReadAll( &fileContents ) )
-        {
-            m_lastToolError = _( "Failed to read schematic file" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-        file.Close();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: File read successfully, size=%zu bytes" ),
-                      fileContents.length() );
-
-        // Apply patch using system patch command
-        // Create temporary files for patch and output
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary files" ) );
-        wxString tempDir = wxFileName::GetTempDir();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Temp directory='%s'" ), tempDir );
-
-        wxString patchFile =
-                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_patch_" ) );
-        wxString inputFile =
-                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_input_" ) );
-        wxString outputFile = inputFile + wxS( ".patched" );
-
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: patchFile='%s'" ), patchFile );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: inputFile='%s'" ), inputFile );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: outputFile='%s'" ), outputFile );
-
-        // Write patch to temp file
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patch to temp file" ) );
-        wxFile patchF( patchFile, wxFile::write );
-        if( !patchF.IsOpened() || !patchF.Write( patch ) )
-        {
-            m_lastToolError = _( "Failed to write patch to temporary file" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( patchFile );
-            wxRemoveFile( inputFile );
-            return false;
-        }
-        patchF.Close();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch file written successfully" ) );
-
-        // Write current contents to temp file
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing input to temp file" ) );
-        wxFile inputF( inputFile, wxFile::write );
-        if( !inputF.IsOpened() || !inputF.Write( fileContents ) )
-        {
-            m_lastToolError = _( "Failed to write input to temporary file" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( patchFile );
-            wxRemoveFile( inputFile );
-            return false;
-        }
-        inputF.Close();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Input file written successfully" ) );
-
-        // Apply patch using system command
-        // Use -f to force non-interactive mode (never prompt)
-        wxString patchCmd = wxString::Format( wxS( "patch -s -f -o %s %s %s 2>&1" ), outputFile, inputFile, patchFile );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing patch command: %s" ), patchCmd );
-
-        // Use popen instead of wxExecute to avoid blocking the GUI thread
-        FILE* pipe = popen( patchCmd.mb_str(), "r" );
-        if( !pipe )
-        {
-            m_lastToolError = _( "Failed to execute patch command" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( patchFile );
-            wxRemoveFile( inputFile );
-            return false;
-        }
-
-        // Read output
-        char     buffer[256];
-        wxString patchOutput;
-        while( fgets( buffer, sizeof( buffer ), pipe ) != nullptr )
-        {
-            patchOutput += wxString::FromUTF8( buffer );
-        }
-
-        int result = pclose( pipe );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch command completed with result=%d" ), result );
-
-        if( !patchOutput.IsEmpty() )
-        {
-            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patch output: %s" ), patchOutput );
-        }
-
-        // Clean up patch and input files
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Cleaning up temp files" ) );
-        wxRemoveFile( patchFile );
-        wxRemoveFile( inputFile );
-
-        if( result != 0 )
-        {
-            wxString errorMsg = _( "Failed to apply patch" );
-            if( !patchOutput.IsEmpty() )
-            {
-                errorMsg += wxS( ": " ) + patchOutput;
-            }
-            m_lastToolError = errorMsg;
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( outputFile );
-            return false;
-        }
-
-        // Read patched contents
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Reading patched file" ) );
-        wxFile outputF( outputFile, wxFile::read );
-        if( !outputF.IsOpened() )
-        {
-            m_lastToolError = _( "Failed to read patched file" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( outputFile );
-            return false;
-        }
-
-        wxString patchedContents;
-        if( !outputF.ReadAll( &patchedContents ) )
-        {
-            m_lastToolError = _( "Failed to read patched contents" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( outputFile );
-            return false;
-        }
-        outputF.Close();
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Patched file read, size=%zu bytes" ), patchedContents.length() );
-
-        // Write patched contents to another temp file for loading
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Writing patched contents to load file" ) );
-        // IMPORTANT: Must have .kicad_sch extension for SCH_IO_MGR::GuessPluginTypeFromSchPath to work
-        wxString loadFile =
-                wxFileName::CreateTempFileName( tempDir + wxFileName::GetPathSeparator() + wxS( "kicad_load_" ) )
-                + wxS( ".kicad_sch" );
-        wxFile loadF( loadFile, wxFile::write );
-        if( !loadF.IsOpened() || !loadF.Write( patchedContents ) )
-        {
-            m_lastToolError = _( "Failed to write patched contents for loading" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( outputFile );
-            wxRemoveFile( loadFile );
-            return false;
-        }
-        loadF.Close();
-        wxRemoveFile( outputFile );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Load file='%s'" ), loadFile );
-
-        // Load patched schematic using SCH_IO
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating SCH_IO plugin" ) );
-        SCH_IO_MGR::SCH_FILE_T fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( loadFile, KICTL_KICAD_ONLY );
-        IO_RELEASER<SCH_IO>    io( SCH_IO_MGR::FindPlugin( fileType ) );
-
-        if( !io )
-        {
-            m_lastToolError = _( "Failed to create schematic IO plugin" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( loadFile );
-            return false;
-        }
-
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Creating temporary schematic" ) );
-        SCHEMATIC tempSchematic( &m_frame->Schematic().Project() );
-        tempSchematic.CreateDefaultScreens();
-
-        SCH_SHEET* newRootSheet = nullptr;
-        try
-        {
-            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Loading patched schematic file" ) );
-            newRootSheet = io->LoadSchematicFile( loadFile, &tempSchematic );
-            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Schematic loaded successfully" ) );
-        }
-        catch( const std::exception& e )
-        {
-            m_lastToolError =
-                    wxString::Format( _( "Failed to load patched schematic: %s" ), wxString::FromUTF8( e.what() ) );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            wxRemoveFile( loadFile );
-            return false;
-        }
-
-        wxRemoveFile( loadFile );
-
-        if( !newRootSheet )
-        {
-            m_lastToolError = _( "Failed to load patched schematic" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        tempSchematic.SetTopLevelSheets( { newRootSheet } );
-
-        // Use SCH_COMMIT to replace items in RAM
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Starting SCH_COMMIT operations" ) );
-        SCH_COMMIT  commit( m_frame );
-        SCH_SCREEN* currentScreen = m_frame->GetScreen();
-        SCH_SCREEN* newScreen = newRootSheet->GetScreen();
-
-        if( !currentScreen || !newScreen )
-        {
-            m_lastToolError = _( "Invalid screen state" );
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        // Remove all existing items
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Removing existing items" ) );
-        std::vector<SCH_ITEM*> itemsToRemove;
-        for( SCH_ITEM* item : currentScreen->Items() )
-        {
-            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
-            {
-                itemsToRemove.push_back( item );
-            }
-        }
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to remove" ), itemsToRemove.size() );
-
-        for( SCH_ITEM* item : itemsToRemove )
-        {
-            commit.Remove( item, currentScreen );
-        }
-
-        // Add all new items
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Adding new items" ) );
-        std::vector<SCH_ITEM*> itemsToAdd;
-        for( SCH_ITEM* item : newScreen->Items() )
-        {
-            if( item->Type() != SCH_SHEET_PIN_T && item->Type() != SCH_FIELD_T )
-            {
-                SCH_ITEM* clonedItem = static_cast<SCH_ITEM*>( item->Clone() );
-                itemsToAdd.push_back( clonedItem );
-            }
-        }
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Found %zu items to add" ), itemsToAdd.size() );
-
-        for( SCH_ITEM* item : itemsToAdd )
-        {
-            commit.Add( item, currentScreen );
-        }
-
-        // GUI operations (commit.Push, RefreshHierarchy, GetCanvas()->Refresh) MUST run on main thread
-        // Use CallAfter with synchronization to wait for completion
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Dispatching GUI operations to main thread" ) );
-
-        std::mutex              commitMutex;
-        std::condition_variable commitCV;
-        bool                    commitDone = false;
-        bool                    commitSuccess = false;
-        wxString                commitError;
-
-        m_frame->CallAfter(
-                [&, commitMessage]()
-                {
-                    try
-                    {
-                        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Executing on main thread - pushing commit" ) );
-                        commit.Push( commitMessage );
-                        wxLogMessage( wxS( "[OllamaAgent] apply_patch: Commit pushed, refreshing hierarchy" ) );
-                        m_frame->Schematic().RefreshHierarchy();
-                        m_frame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
-
-                        if( m_frame->GetCanvas() )
-                        {
-                            wxLogMessage( wxS( "[OllamaAgent] apply_patch: Refreshing canvas" ) );
-                            m_frame->GetCanvas()->Refresh();
-                        }
-
-                        commitSuccess = true;
-                    }
-                    catch( const std::exception& e )
-                    {
-                        commitError =
-                                wxString::Format( _( "GUI operations failed: %s" ), wxString::FromUTF8( e.what() ) );
-                        wxLogError( wxS( "[OllamaAgent] apply_patch: %s" ), commitError );
-                    }
-                    catch( ... )
-                    {
-                        commitError = _( "Unknown error during GUI operations" );
-                        wxLogError( wxS( "[OllamaAgent] apply_patch: Unknown exception" ) );
-                    }
-
-                    std::lock_guard<std::mutex> lock( commitMutex );
-                    commitDone = true;
-                    commitCV.notify_one();
-                } );
-
-        // Wait for main thread to complete
-        {
-            std::unique_lock<std::mutex> lock( commitMutex );
-            commitCV.wait( lock,
-                           [&]
-                           {
-                               return commitDone;
-                           } );
-        }
-
-        if( !commitSuccess )
-        {
-            m_lastToolError = commitError;
-            wxLogWarning( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-            return false;
-        }
-
-        m_lastToolResult = wxS( "{\"ok\": true, \"message\": \"Patch applied successfully\"}" );
-        wxLogMessage( wxS( "[OllamaAgent] apply_patch: COMPLETED SUCCESSFULLY" ) );
-
-        return true;
-    }
-    catch( const std::exception& e )
-    {
-        m_lastToolError = wxString::Format( _( "Exception during apply_patch: %s" ), wxString::FromUTF8( e.what() ) );
-        wxLogError( wxS( "[OllamaAgent] apply_patch: %s" ), m_lastToolError );
-        return false;
-    }
-    catch( ... )
-    {
-        m_lastToolError = _( "Unknown exception during apply_patch" );
-        wxLogError( wxS( "[OllamaAgent] apply_patch: Unknown exception caught" ) );
-        return false;
-    }
 }
 
 

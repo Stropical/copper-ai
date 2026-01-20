@@ -281,7 +281,7 @@ void SCH_OLLAMA_AGENT_DIALOG::sendMessage()
     wxString message = m_inputCtrl->GetValue().Trim();
     
     // Log the captured message for debugging
-    wxLogMessage( wxS( "[OllamaAgent] Dialog captured user message: %s" ), message.wx_str() );
+    wxLogDebug( wxS( "[OllamaAgent] Dialog captured user message: %s" ), message.wx_str() );
     
     if( message.IsEmpty() || m_isProcessing )
         return;

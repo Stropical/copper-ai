@@ -123,18 +123,18 @@ private:
 
     SYMBOL_MATCH findSymbolByRefOrValue( const wxString& aIdentifier, bool aCurrentSheetOnly = false );
 
-    bool     ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
-    bool     HandlePlaceComponentTool( const nlohmann::json& aPayload );
-    bool     HandleRemoveComponentTool( const nlohmann::json& aPayload );
-    bool     HandleSetPropertyTool( const nlohmann::json& aPayload );
-    bool     HandleMoveComponentTool( const nlohmann::json& aPayload );
-    bool     HandleAddWireTool( const nlohmann::json& aPayload );
-    bool     HandleAddNetLabelTool( const nlohmann::json& aPayload );
-    bool     HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
-    bool     HandleGetDatasheetTool( const nlohmann::json& aPayload );
-    bool     HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
-    bool     HandleSearchSymbolTool( const nlohmann::json& aPayload );
-    bool     HandleApplyPatchTool( const nlohmann::json& aPayload );
+    bool ExecuteToolCommand( const wxString& aToolName, const wxString& aPayload );
+    bool HandlePlaceComponentTool( const nlohmann::json& aPayload );
+    bool HandleRemoveComponentTool( const nlohmann::json& aPayload );
+    bool HandleSetPropertyTool( const nlohmann::json& aPayload );
+    bool HandleMoveComponentTool( const nlohmann::json& aPayload );
+    bool HandleAddWireTool( const nlohmann::json& aPayload );
+    bool HandleAddNetLabelTool( const nlohmann::json& aPayload );
+    bool HandleConnectWithNetLabelTool( const nlohmann::json& aPayload );
+    bool HandleGetDatasheetTool( const nlohmann::json& aPayload );
+    bool HandleGetSymbolInfoTool( const nlohmann::json& aPayload );
+    bool HandleSearchSymbolTool( const nlohmann::json& aPayload );
+
     wxString GetCurrentSchematicContent();
 
     std::unique_ptr<SCH_AGENT>                  m_agent;

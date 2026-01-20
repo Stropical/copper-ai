@@ -73,7 +73,15 @@ public:
     /**
      * Get the port the server is listening on
      */
+    /**
+     * Get the port the server is listening on
+     */
     int GetPort() const { return m_port; }
+
+    /**
+     * Handle a client connection (public for worker threads)
+     */
+    void HandleClient( wxSocketBase* aSocket );
 
 protected:
     /**
@@ -83,21 +91,14 @@ protected:
 
 private:
     /**
-     * Handle a client connection
-     */
-    void HandleClient( wxSocketBase* aSocket );
-
-    /**
      * Parse HTTP request
      */
-    bool ParseRequest( const wxString& aRequest, wxString& aMethod, 
-                       wxString& aPath, wxString& aBody );
+    bool ParseRequest( const wxString& aRequest, wxString& aMethod, wxString& aPath, wxString& aBody );
 
     /**
      * Send HTTP response
      */
-    void SendResponse( wxSocketBase* aSocket, int aStatusCode, 
-                      const wxString& aContentType, const wxString& aBody );
+    void SendResponse( wxSocketBase* aSocket, int aStatusCode, const wxString& aContentType, const wxString& aBody );
 
     /**
      * Handle tool execution request
@@ -115,10 +116,10 @@ private:
     wxString CreateSuccessResponse( const wxString& aResult );
 
     SCH_OLLAMA_AGENT_TOOL* m_tool;
-    int m_port;
-    bool m_running;
-    wxSocketServer* m_server;
-    wxMutex m_mutex;
+    int                    m_port;
+    bool                   m_running;
+    wxSocketServer*        m_server;
+    wxMutex                m_mutex;
 };
 
 #endif // SCH_TOOL_HTTP_SERVER_H
